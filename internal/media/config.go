@@ -7,6 +7,8 @@ const (
 	defaultWSPath                = "/stream"
 	defaultMaxConcurrentSessions = 1000
 	defaultAudioBufferSize       = 8
+	defaultTargetSampleRate      = 16000
+	defaultFrameDurationMs       = 20
 	defaultReadTimeout           = 60 * time.Second
 	defaultWriteTimeout          = 10 * time.Second
 )
@@ -19,6 +21,8 @@ type Config struct {
 	TLSKeyFile            string
 	MaxConcurrentSessions int
 	AudioBufferSize       int
+	TargetSampleRate      int
+	FrameDurationMs       int
 }
 
 // DefaultConfig returns a Config populated with sensible CT-1 defaults.
@@ -28,6 +32,17 @@ func DefaultConfig() Config {
 		WSPath:                defaultWSPath,
 		MaxConcurrentSessions: defaultMaxConcurrentSessions,
 		AudioBufferSize:       defaultAudioBufferSize,
+		TargetSampleRate:      defaultTargetSampleRate,
+		FrameDurationMs:       defaultFrameDurationMs,
+	}
+}
+
+// TargetFormat returns the canonical PCM16 layout configured for transcoding.
+func (c Config) TargetFormat() TargetFormat {
+	c = c.withDefaults()
+	return TargetFormat{
+		SampleRate: c.TargetSampleRate,
+		Channels:   1,
 	}
 }
 
@@ -43,6 +58,12 @@ func (c Config) withDefaults() Config {
 	}
 	if c.AudioBufferSize <= 0 {
 		c.AudioBufferSize = defaultAudioBufferSize
+	}
+	if c.TargetSampleRate != 8000 && c.TargetSampleRate != 16000 {
+		c.TargetSampleRate = defaultTargetSampleRate
+	}
+	if c.FrameDurationMs <= 0 {
+		c.FrameDurationMs = defaultFrameDurationMs
 	}
 	return c
 }
