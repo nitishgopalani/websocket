@@ -13,6 +13,7 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	cfg := media.DefaultConfig()
 	denoiseCfg := media.DenoiseConfigFromEnv()
+	asrCfg := media.ASRConfigFromEnv()
 
 	if addr := os.Getenv("LISTEN_ADDR"); addr != "" {
 		cfg.ListenAddr = addr
@@ -39,11 +40,23 @@ func main() {
 		}
 	}()
 
+	asrProvider, err := media.NewASRProvider(asrCfg)
+	if err != nil {
+		logger.Error("asr provider init failed", "error", err)
+		os.Exit(1)
+	}
+
 	target := cfg.TargetFormat()
+	transcriptConsumer := media.NewLoggingTranscriptConsumer(logger)
 	sinkFactory := func() media.AudioSink {
 		return media.NewTranscodeSink(
 			media.NewDenoiseSink(
-				media.NewLoggingSink(logger),
+				media.NewASRSink(
+					asrProvider,
+					transcriptConsumer,
+					target.SampleRate,
+					logger,
+				),
 				denoiser,
 				media.NoopAEC{},
 				target.SampleRate,
@@ -59,6 +72,7 @@ func main() {
 		"target_sample_rate", target.SampleRate,
 		"frame_duration_ms", cfg.FrameDurationMs,
 		"denoise_enabled", denoiseCfg.Enabled,
+		"asr_enabled", asrCfg.Enabled,
 	)
 
 	srv := media.NewServer(cfg, logger, sinkFactory)
