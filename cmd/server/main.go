@@ -14,6 +14,7 @@ func main() {
 	cfg := media.DefaultConfig()
 	denoiseCfg := media.DenoiseConfigFromEnv()
 	asrCfg := media.ASRConfigFromEnv()
+	amdCfg := media.AMDConfigFromEnv()
 
 	if addr := os.Getenv("LISTEN_ADDR"); addr != "" {
 		cfg.ListenAddr = addr
@@ -46,15 +47,35 @@ func main() {
 		os.Exit(1)
 	}
 
+	amdClassifier, err := media.NewAMDClassifier(amdCfg)
+	if err != nil {
+		logger.Error("amd classifier init failed", "error", err)
+		os.Exit(1)
+	}
+	defer func() {
+		if err := amdClassifier.Close(); err != nil {
+			logger.Warn("amd classifier close failed", "error", err)
+		}
+	}()
+
 	target := cfg.TargetFormat()
 	transcriptConsumer := media.NewLoggingTranscriptConsumer(logger)
+	amdListener := media.NewLoggingAMDListener(logger)
+
 	sinkFactory := func() media.AudioSink {
 		return media.NewTranscodeSink(
 			media.NewDenoiseSink(
-				media.NewASRSink(
-					asrProvider,
-					transcriptConsumer,
+				media.NewAMDGateSink(
+					media.NewASRSink(
+						asrProvider,
+						transcriptConsumer,
+						target.SampleRate,
+						logger,
+					),
+					amdClassifier,
+					amdListener,
 					target.SampleRate,
+					amdCfg,
 					logger,
 				),
 				denoiser,
@@ -72,6 +93,7 @@ func main() {
 		"target_sample_rate", target.SampleRate,
 		"frame_duration_ms", cfg.FrameDurationMs,
 		"denoise_enabled", denoiseCfg.Enabled,
+		"amd_enabled", amdCfg.Enabled,
 		"asr_enabled", asrCfg.Enabled,
 	)
 
