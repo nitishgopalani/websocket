@@ -15,6 +15,8 @@ func main() {
 	denoiseCfg := media.DenoiseConfigFromEnv()
 	asrCfg := media.ASRConfigFromEnv()
 	amdCfg := media.AMDConfigFromEnv()
+	endpointCfg := media.EndpointConfigFromEnv()
+	localVADEnabled, localVADSilero := media.LocalVADConfigFromEnv()
 
 	if addr := os.Getenv("LISTEN_ADDR"); addr != "" {
 		cfg.ListenAddr = addr
@@ -58,17 +60,25 @@ func main() {
 		}
 	}()
 
+	localVAD := media.NewLocalVAD(localVADEnabled, localVADSilero)
+	turnListener := media.NewLoggingTurnListener(logger)
 	target := cfg.TargetFormat()
-	transcriptConsumer := media.NewLoggingTranscriptConsumer(logger)
 	amdListener := media.NewLoggingAMDListener(logger)
 
 	sinkFactory := func() media.AudioSink {
+		turnManager := media.NewTurnManager(
+			turnListener,
+			endpointCfg,
+			media.RealClock{},
+			localVAD,
+			logger,
+		)
 		return media.NewTranscodeSink(
 			media.NewDenoiseSink(
 				media.NewAMDGateSink(
 					media.NewASRSink(
 						asrProvider,
-						transcriptConsumer,
+						turnManager,
 						target.SampleRate,
 						logger,
 					),
@@ -95,6 +105,7 @@ func main() {
 		"denoise_enabled", denoiseCfg.Enabled,
 		"amd_enabled", amdCfg.Enabled,
 		"asr_enabled", asrCfg.Enabled,
+		"local_vad_enabled", localVADEnabled,
 	)
 
 	srv := media.NewServer(cfg, logger, sinkFactory)
