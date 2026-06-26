@@ -12,6 +12,8 @@ import (
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	cfg := media.DefaultConfig()
+	denoiseCfg := media.DenoiseConfigFromEnv()
+
 	if addr := os.Getenv("LISTEN_ADDR"); addr != "" {
 		cfg.ListenAddr = addr
 	}
@@ -26,15 +28,38 @@ func main() {
 		}
 	}
 
+	denoiser, err := media.NewDenoiser(denoiseCfg)
+	if err != nil {
+		logger.Error("denoiser init failed", "error", err)
+		os.Exit(1)
+	}
+	defer func() {
+		if err := denoiser.Close(); err != nil {
+			logger.Warn("denoiser close failed", "error", err)
+		}
+	}()
+
 	target := cfg.TargetFormat()
 	sinkFactory := func() media.AudioSink {
 		return media.NewTranscodeSink(
-			media.NewLoggingSink(logger),
+			media.NewDenoiseSink(
+				media.NewLoggingSink(logger),
+				denoiser,
+				media.NoopAEC{},
+				target.SampleRate,
+				logger,
+			),
 			target,
 			cfg.FrameDurationMs,
 			logger,
 		)
 	}
+
+	logger.Info("audio pipeline ready",
+		"target_sample_rate", target.SampleRate,
+		"frame_duration_ms", cfg.FrameDurationMs,
+		"denoise_enabled", denoiseCfg.Enabled,
+	)
 
 	srv := media.NewServer(cfg, logger, sinkFactory)
 	if err := srv.Run(context.Background()); err != nil {

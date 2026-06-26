@@ -25,9 +25,9 @@ type TargetFormat struct {
 	Channels   int // 1 = mono
 }
 
-// DefaultTargetFormat returns PCM16 mono at 16 kHz.
+// DefaultTargetFormat returns PCM16 mono at 8 kHz (telephony canonical rate for CT-4).
 func DefaultTargetFormat() TargetFormat {
-	return TargetFormat{SampleRate: 16000, Channels: 1}
+	return TargetFormat{SampleRate: 8000, Channels: 1}
 }
 
 // FrameSizeBytes returns the PCM16 byte size for a frame of frameDurationMs milliseconds.

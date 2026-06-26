@@ -7,7 +7,7 @@ const (
 	defaultWSPath                = "/stream"
 	defaultMaxConcurrentSessions = 1000
 	defaultAudioBufferSize       = 8
-	defaultTargetSampleRate      = 16000
+	defaultTargetSampleRate      = 8000
 	defaultFrameDurationMs       = 20
 	defaultReadTimeout           = 60 * time.Second
 	defaultWriteTimeout          = 10 * time.Second
