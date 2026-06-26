@@ -16,6 +16,8 @@ func main() {
 	asrCfg := media.ASRConfigFromEnv()
 	amdCfg := media.AMDConfigFromEnv()
 	endpointCfg := media.EndpointConfigFromEnv()
+	semanticCfg := media.SemanticTurnConfigFromEnv()
+	backchannelCfg := media.BackchannelConfigFromEnv()
 	localVADEnabled, localVADSilero := media.LocalVADConfigFromEnv()
 
 	if addr := os.Getenv("LISTEN_ADDR"); addr != "" {
@@ -62,6 +64,29 @@ func main() {
 
 	localVAD := media.NewLocalVAD(localVADEnabled, localVADSilero)
 	turnListener := media.NewLoggingTurnListener(logger)
+
+	semanticTurn, err := media.NewSemanticTurnDetector(semanticCfg)
+	if err != nil {
+		logger.Error("semantic turn detector init failed", "error", err)
+		os.Exit(1)
+	}
+	defer func() {
+		if err := semanticTurn.Close(); err != nil {
+			logger.Warn("semantic turn detector close failed", "error", err)
+		}
+	}()
+
+	backchannel, err := media.NewBackchannelClassifier(backchannelCfg)
+	if err != nil {
+		logger.Error("backchannel classifier init failed", "error", err)
+		os.Exit(1)
+	}
+	defer func() {
+		if err := backchannel.Close(); err != nil {
+			logger.Warn("backchannel classifier close failed", "error", err)
+		}
+	}()
+
 	target := cfg.TargetFormat()
 	amdListener := media.NewLoggingAMDListener(logger)
 
@@ -71,6 +96,9 @@ func main() {
 			endpointCfg,
 			media.RealClock{},
 			localVAD,
+			semanticTurn,
+			semanticCfg,
+			backchannel,
 			logger,
 		)
 		return media.NewTranscodeSink(
@@ -106,6 +134,8 @@ func main() {
 		"amd_enabled", amdCfg.Enabled,
 		"asr_enabled", asrCfg.Enabled,
 		"local_vad_enabled", localVADEnabled,
+		"semantic_turn_enabled", semanticCfg.Enabled,
+		"backchannel_enabled", backchannelCfg.Enabled,
 	)
 
 	srv := media.NewServer(cfg, logger, sinkFactory)

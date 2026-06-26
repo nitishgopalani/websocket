@@ -32,7 +32,7 @@ func TestTurnManagerEndOfTurnAfterSilence(t *testing.T) {
 	clock := media.NewFakeClock(time.Now())
 	listener := &recordingTurnListener{}
 	cfg := defaultTurnTestConfig()
-	tm := media.NewTurnManager(listener, cfg, clock, media.NoopVAD{}, nil)
+	tm := media.NewTurnManager(listener, cfg, clock, media.NoopVAD{}, nil, media.SemanticTurnConfig{}, nil, nil)
 	session := &media.Session{StreamSID: "MZ-T1"}
 	ctx := context.Background()
 
@@ -61,7 +61,7 @@ func TestTurnManagerPerFlowThresholds(t *testing.T) {
 	clock := media.NewFakeClock(time.Now())
 	listener := &recordingTurnListener{}
 	cfg := defaultTurnTestConfig()
-	tm := media.NewTurnManager(listener, cfg, clock, media.NoopVAD{}, nil)
+	tm := media.NewTurnManager(listener, cfg, clock, media.NoopVAD{}, nil, media.SemanticTurnConfig{}, nil, nil)
 	session := &media.Session{StreamSID: "MZ-FLOW"}
 	ctx := context.Background()
 
@@ -78,7 +78,7 @@ func TestTurnManagerPerFlowThresholds(t *testing.T) {
 
 	listener.events = nil
 	clock2 := media.NewFakeClock(time.Now())
-	tm2 := media.NewTurnManager(listener, cfg, clock2, media.NoopVAD{}, nil)
+	tm2 := media.NewTurnManager(listener, cfg, clock2, media.NoopVAD{}, nil, media.SemanticTurnConfig{}, nil, nil)
 	tm2.SetFlowClass(session, media.FlowSpelledInput)
 	tm2.OnSpeechStart(ctx, session)
 	tm2.OnPartial(ctx, session, media.Transcript{Text: "one two"})
@@ -100,7 +100,7 @@ func TestTurnManagerPerFlowThresholds(t *testing.T) {
 
 func TestTurnManagerInterruptWhenAgentSpeaking(t *testing.T) {
 	listener := &recordingTurnListener{}
-	tm := media.NewTurnManager(listener, defaultTurnTestConfig(), media.NewFakeClock(time.Now()), media.NoopVAD{}, nil)
+	tm := media.NewTurnManager(listener, defaultTurnTestConfig(), media.NewFakeClock(time.Now()), media.NoopVAD{}, nil, media.SemanticTurnConfig{}, nil, nil)
 	session := &media.Session{StreamSID: "MZ-INT"}
 	ctx := context.Background()
 
@@ -118,7 +118,7 @@ func TestTurnManagerMaxUtteranceForcesEndOfTurn(t *testing.T) {
 	listener := &recordingTurnListener{}
 	cfg := defaultTurnTestConfig()
 	cfg.MaxUtteranceMs = 1000
-	tm := media.NewTurnManager(listener, cfg, clock, media.NoopVAD{}, nil)
+	tm := media.NewTurnManager(listener, cfg, clock, media.NoopVAD{}, nil, media.SemanticTurnConfig{}, nil, nil)
 	session := &media.Session{StreamSID: "MZ-MAX"}
 	ctx := context.Background()
 
@@ -141,7 +141,7 @@ func TestTurnManagerMaxUtteranceForcesEndOfTurn(t *testing.T) {
 func TestTurnManagerNoDoubleEndOfTurn(t *testing.T) {
 	clock := media.NewFakeClock(time.Now())
 	listener := &recordingTurnListener{}
-	tm := media.NewTurnManager(listener, defaultTurnTestConfig(), clock, media.NoopVAD{}, nil)
+	tm := media.NewTurnManager(listener, defaultTurnTestConfig(), clock, media.NoopVAD{}, nil, media.SemanticTurnConfig{}, nil, nil)
 	session := &media.Session{StreamSID: "MZ-ONCE"}
 	ctx := context.Background()
 
@@ -161,7 +161,7 @@ func TestTurnManagerPartialResetsSilenceTimer(t *testing.T) {
 	clock := media.NewFakeClock(time.Now())
 	listener := &recordingTurnListener{}
 	cfg := defaultTurnTestConfig()
-	tm := media.NewTurnManager(listener, cfg, clock, media.NoopVAD{}, nil)
+	tm := media.NewTurnManager(listener, cfg, clock, media.NoopVAD{}, nil, media.SemanticTurnConfig{}, nil, nil)
 	session := &media.Session{StreamSID: "MZ-RESET"}
 	ctx := context.Background()
 
@@ -208,5 +208,5 @@ func filterTurnKind(events []media.TurnEvent, kind media.TurnKind) []media.TurnE
 }
 
 func TestTurnManagerIsTranscriptConsumer(t *testing.T) {
-	var _ media.TranscriptConsumer = media.NewTurnManager(nil, media.DefaultEndpointConfig(), media.NewFakeClock(time.Now()), media.NoopVAD{}, nil)
+	var _ media.TranscriptConsumer = media.NewTurnManager(nil, media.DefaultEndpointConfig(), media.NewFakeClock(time.Now()), media.NoopVAD{}, nil, media.SemanticTurnConfig{}, nil, nil)
 }
