@@ -131,6 +131,16 @@ func (m *TurnManager) ObserveAudio(ctx context.Context, session *Session, pcm16 
 	}
 }
 
+// SetListener replaces the downstream TurnListener (e.g. attach EB-6 brain client after construction).
+func (m *TurnManager) SetListener(next TurnListener) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if next == nil {
+		next = NewLoggingTurnListener(m.logger)
+	}
+	m.next = next
+}
+
 func (m *TurnManager) OnSpeechStart(ctx context.Context, session *Session) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

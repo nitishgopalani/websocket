@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 
+	"websocket/internal/brain"
 	"websocket/internal/media"
 )
 
@@ -18,6 +19,7 @@ func main() {
 	endpointCfg := media.EndpointConfigFromEnv()
 	semanticCfg := media.SemanticTurnConfigFromEnv()
 	backchannelCfg := media.BackchannelConfigFromEnv()
+	brainCfg := brain.ConfigFromEnv()
 	localVADEnabled, localVADSilero := media.LocalVADConfigFromEnv()
 
 	if addr := os.Getenv("LISTEN_ADDR"); addr != "" {
@@ -101,7 +103,13 @@ func main() {
 			backchannel,
 			logger,
 		)
-		return media.NewTranscodeSink(
+		var brainClient *brain.Client
+		if brainCfg.Enabled {
+			replyHandler := &brain.LoggingReplyHandler{Logger: logger}
+			brainClient = brain.NewClient(brainCfg, replyHandler, turnManager, logger)
+			turnManager.SetListener(brainClient)
+		}
+		pipeline := media.NewTranscodeSink(
 			media.NewDenoiseSink(
 				media.NewAMDGateSink(
 					media.NewASRSink(
@@ -125,6 +133,10 @@ func main() {
 			cfg.FrameDurationMs,
 			logger,
 		)
+		if brainClient != nil {
+			return &brain.BootstrapSink{Inner: pipeline, Brain: brainClient}
+		}
+		return pipeline
 	}
 
 	logger.Info("audio pipeline ready",
@@ -136,6 +148,7 @@ func main() {
 		"local_vad_enabled", localVADEnabled,
 		"semantic_turn_enabled", semanticCfg.Enabled,
 		"backchannel_enabled", backchannelCfg.Enabled,
+		"brain_ws_enabled", brainCfg.Enabled,
 	)
 
 	srv := media.NewServer(cfg, logger, sinkFactory)
