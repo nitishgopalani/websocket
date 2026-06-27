@@ -52,7 +52,7 @@ require_keys() {
     echo "FAIL: ELEVENLABS_API_KEY is empty — add it to .env (never commit)"
     missing=1
   fi
-  if [[ -n "$missing" ]]; then
+  if (( missing != 0 )); then
     return 1
   fi
   return 0
