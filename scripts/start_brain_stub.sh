@@ -31,7 +31,9 @@ cd "$COLLECTION"
 # shellcheck disable=SC1091
 source .venv/bin/activate
 # Force stub over Collection/.env (may set LLM_STUB=false).
-nohup env STUB_MODE=true LLM_STUB=true uvicorn app.main:app --host 0.0.0.0 --port 8000 \
+# Force full stub stack over Collection/.env (may set LLM_STUB/KB_STUB=false).
+nohup env STUB_MODE=true LLM_STUB=true KB_STUB=true TOOLS_MODE=stub \
+  uvicorn app.main:app --host 0.0.0.0 --port 8000 \
   >>"$BRAIN_LOG" 2>&1 &
 brain_pid=$!
 deactivate 2>/dev/null || true
