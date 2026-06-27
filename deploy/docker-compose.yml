@@ -1,0 +1,84 @@
+# Fonada voice stack — offline bundle compose (images pre-loaded via load_and_run.sh).
+# Build on a dev machine: bash build_bundle.sh
+# Run on server: bash load_and_run.sh
+name: fonada-voice
+
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  brain:
+    image: fonada/voice-brain:latest
+    restart: unless-stopped
+    environment:
+      STUB_MODE: "true"
+      LLM_STUB: "true"
+      KB_STUB: "true"
+      TOOLS_MODE: stub
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8000/healthz"]
+      interval: 10s
+      timeout: 5s
+      start_period: 25s
+      retries: 8
+
+  denoise:
+    image: fonada/voice-denoise:latest
+    restart: unless-stopped
+    profiles: ["full"]
+
+  amd:
+    image: fonada/voice-amd:latest
+    restart: unless-stopped
+    profiles: ["full"]
+    environment:
+      WHISPER_MODEL: tiny
+      WHISPER_DEVICE: cpu
+
+  semantic-turn:
+    image: fonada/voice-semantic-turn:latest
+    restart: unless-stopped
+
+  go-server:
+    image: fonada/voice-go-server:latest
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "8080:8080"
+    environment:
+      LISTEN_ADDR: ":8080"
+      BRAIN_WS_URL: ws://brain:8000/ws/brain
+      DENOISE_ADDR: denoise:9091
+      AMD_ADDR: amd:9092
+      SEMANTIC_TURN_ADDR: semantic-turn:9093
+      CARRIER: asterisk
+      TARGET_SAMPLE_RATE: "16000"
+      TTS_OUTPUT_FORMAT: pcm_24000
+    depends_on:
+      brain:
+        condition: service_healthy
+      semantic-turn:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      start_period: 25s
+      retries: 10
+
+  smoke:
+    image: fonada/voice-smoke:latest
+    profiles: ["test"]
+    environment:
+      WS_URL: ws://go-server:8080/stream
+      SMOKE_EXPECT_TTS: "false"
+    depends_on:
+      go-server:
+        condition: service_healthy

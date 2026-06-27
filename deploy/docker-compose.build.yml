@@ -1,0 +1,40 @@
+# Build-time compose — run from Websocket/deploy/ on a dev machine with internet.
+#   docker compose -f docker-compose.build.yml build
+name: fonada-voice
+
+services:
+  brain:
+    build:
+      context: ../../Collection
+      dockerfile: docker/Dockerfile.brain
+    image: fonada/voice-brain:latest
+
+  denoise:
+    build:
+      context: ..
+      dockerfile: deploy/docker/Dockerfile.denoise
+    image: fonada/voice-denoise:latest
+
+  amd:
+    build:
+      context: ..
+      dockerfile: deploy/docker/Dockerfile.amd
+    image: fonada/voice-amd:latest
+
+  semantic-turn:
+    build:
+      context: ..
+      dockerfile: deploy/docker/Dockerfile.semantic-turn
+    image: fonada/voice-semantic-turn:latest
+
+  go-server:
+    build:
+      context: ..
+      dockerfile: deploy/docker/Dockerfile.go-server
+    image: fonada/voice-go-server:latest
+
+  smoke:
+    build:
+      context: ..
+      dockerfile: deploy/docker/Dockerfile.smoke
+    image: fonada/voice-smoke:latest

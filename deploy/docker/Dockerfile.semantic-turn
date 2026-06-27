@@ -1,0 +1,17 @@
+# syntax=docker/dockerfile:1
+# Semantic turn worker — smart-turn-v3 ONNX baked in at build (no runtime download).
+FROM python:3.11-slim-bookworm
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY workers/semantic_turn/requirements.txt workers/semantic_turn/whisper_features.py ./
+RUN pip install --no-cache-dir -r requirements.txt
+ARG SMART_TURN_ONNX_URL=https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/main/smart-turn-v3.0.onnx
+RUN curl -fsSL -o smart-turn-v3.0.onnx "${SMART_TURN_ONNX_URL}"
+ENV SMART_TURN_ONNX=/app/smart-turn-v3.0.onnx
+COPY workers/semantic_turn/server.py .
+EXPOSE 9093
+HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=5 \
+    CMD python -c "import socket; s=socket.create_connection(('127.0.0.1',9093),3); s.close()"
+CMD ["python", "server.py", "--addr", "0.0.0.0:9093"]

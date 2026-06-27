@@ -1,0 +1,19 @@
+# syntax=docker/dockerfile:1
+# AMD worker — faster-whisper tiny pre-cached for offline/air-gapped runtime (CPU default).
+FROM python:3.11-slim-bookworm
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY workers/amd/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+ENV WHISPER_MODEL=tiny \
+    WHISPER_DEVICE=cpu \
+    AMD_PROBA_HUMAN_THRESHOLD=0.4 \
+    AMD_WINDOW_MS=2000
+RUN python -c "from faster_whisper import WhisperModel; WhisperModel('tiny', device='cpu', compute_type='int8')"
+COPY workers/amd/server.py .
+EXPOSE 9092
+HEALTHCHECK --interval=15s --timeout=5s --start-period=120s --retries=5 \
+    CMD python -c "import socket; s=socket.create_connection(('127.0.0.1',9092),3); s.close()"
+CMD ["python", "server.py", "--addr", "0.0.0.0:9092"]

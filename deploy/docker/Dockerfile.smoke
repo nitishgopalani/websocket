@@ -1,0 +1,15 @@
+# syntax=docker/dockerfile:1
+# One-shot Asterisk-protocol smoke client for compose network tests.
+FROM golang:1.23-bookworm AS builder
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/deploy-smoke ./deploy/cmd/smoke
+
+FROM debian:bookworm-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /out/deploy-smoke /usr/local/bin/deploy-smoke
+ENTRYPOINT ["/usr/local/bin/deploy-smoke"]

@@ -1,0 +1,21 @@
+# syntax=docker/dockerfile:1
+# Denoise worker — DeepFilterNet (CPU torch wheels; Rust needed for deepfilterlib build).
+FROM rust:1.83-bookworm AS rust
+FROM python:3.11-bookworm
+COPY --from=rust /usr/local/cargo /usr/local/cargo
+COPY --from=rust /usr/local/rustup /usr/local/rustup
+ENV PATH="/usr/local/cargo/bin:${PATH}" \
+    CARGO_HOME=/usr/local/cargo \
+    RUSTUP_HOME=/usr/local/rustup
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential pkg-config libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY workers/denoise/requirements.txt .
+RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch torchaudio \
+    && pip install --no-cache-dir -r requirements.txt
+COPY workers/denoise/server.py .
+EXPOSE 9091
+HEALTHCHECK --interval=15s --timeout=5s --start-period=180s --retries=5 \
+    CMD python -c "import socket; s=socket.create_connection(('127.0.0.1',9091),3); s.close()"
+CMD ["python", "server.py", "--addr", "0.0.0.0:9091"]

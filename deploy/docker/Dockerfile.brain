@@ -1,0 +1,19 @@
+# syntax=docker/dockerfile:1
+# Collection brain — stub mode default (no Vertex/Upstash creds required).
+FROM python:3.11-slim-bookworm
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY pyproject.toml README.md ./
+COPY app ./app
+RUN pip install --no-cache-dir .
+ENV STUB_MODE=true \
+    LLM_STUB=true \
+    KB_STUB=true \
+    TOOLS_MODE=stub \
+    WS_ENABLED=true
+EXPOSE 8000
+HEALTHCHECK --interval=10s --timeout=5s --start-period=25s --retries=8 \
+    CMD curl -sf http://127.0.0.1:8000/healthz || exit 1
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

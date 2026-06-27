@@ -1,0 +1,11 @@
+scripts/
+deploy/
+*.tar
+*.tar.gz
+.git
+.env
+.env.local
+.env.live
+**/__pycache__
+**/.venv
+**/.pytest_cache
