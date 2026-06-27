@@ -25,9 +25,11 @@ func main() {
 	bargeInCfg := media.BargeInConfigFromEnv()
 	localVADEnabled, localVADSilero := media.LocalVADConfigFromEnv()
 	carrierCfg := media.CarrierConfigFromEnv()
+	carrierProfile := carrierCfg.Profile()
 	voicemailCfg := media.VoicemailConfigFromEnv()
 	carrierSerializer := media.NewCarrierSerializer(carrierCfg)
 	sessionCloser := &media.SessionCloserHolder{}
+	cfg.Carrier = carrierCfg
 
 	if addr := os.Getenv("LISTEN_ADDR"); addr != "" {
 		cfg.ListenAddr = addr
@@ -36,12 +38,18 @@ func main() {
 		if v, err := strconv.Atoi(rate); err == nil {
 			cfg.TargetSampleRate = v
 		}
+	} else if carrierProfile.Variant == media.CarrierAsterisk {
+		cfg.TargetSampleRate = carrierProfile.InputSampleRate
 	}
 	if ms := os.Getenv("FRAME_DURATION_MS"); ms != "" {
 		if v, err := strconv.Atoi(ms); err == nil {
 			cfg.FrameDurationMs = v
 		}
 	}
+	if carrierProfile.Variant == media.CarrierAsterisk && os.Getenv("TTS_OUTPUT_FORMAT") == "" {
+		ttsCfg.OutputFormat = "pcm_24000"
+	}
+	sessionCloser.SetCarrierProfile(carrierProfile)
 
 	denoiser, err := media.NewDenoiser(denoiseCfg)
 	if err != nil {
@@ -138,8 +146,11 @@ func main() {
 			if err != nil {
 				logger.Warn("tts stream open failed; using logging reply consumer", "error", err)
 			} else {
-				carrierEgress = media.NewCarrierEgress(egressCfg, cfg.FrameDurationMs, sessionClock, carrierSerializer, logger)
-				ttsConsumer = media.NewTTSReplyConsumer(stream, carrierEgress, turnManager, nil, logger)
+				carrierEgress = media.NewCarrierEgress(egressCfg, cfg.FrameDurationMs, sessionClock, carrierSerializer, carrierProfile, logger)
+				onEndCall := func(ctx context.Context, s *media.Session) {
+					sessionCloser.EndCallSession(ctx, s)
+				}
+				ttsConsumer = media.NewTTSReplyConsumer(stream, carrierEgress, turnManager, onEndCall, logger)
 				replyConsumer = ttsConsumer
 			}
 		}

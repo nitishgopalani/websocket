@@ -22,7 +22,7 @@ func TestCallControlOpenerOnHumanWhenAMDEnabled(t *testing.T) {
 		AMDEnabled: true,
 		Voicemail:  media.DefaultVoicemailConfig(),
 	})
-	egress := media.NewCarrierEgress(media.DefaultEgressConfig(), 20, media.RealClock{}, nil, nil)
+	egress := media.NewCarrierEgress(media.DefaultEgressConfig(), 20, media.RealClock{}, nil, media.DefaultCarrierProfile(), nil)
 	egress.EnableHumanGate()
 	session := &media.Session{StreamSID: "MZ-H"}
 	ctrl.Bind(nil, nil, egress, nil)
@@ -61,7 +61,7 @@ func TestCallControlLeaveMessageSpeaksOnce(t *testing.T) {
 		spoken: make(chan struct{}, 1),
 	}
 	tts := media.NewTTSReplyConsumer(stream, &noopEgress{}, nil, nil, nil)
-	egress := media.NewCarrierEgress(media.DefaultEgressConfig(), 20, media.RealClock{}, nil, nil)
+	egress := media.NewCarrierEgress(media.DefaultEgressConfig(), 20, media.RealClock{}, nil, media.DefaultCarrierProfile(), nil)
 	ctrl := brain.NewCallControl(brain.CallControlConfig{
 		AMDEnabled: true,
 		Voicemail: media.VoicemailConfig{

@@ -47,7 +47,8 @@ type SessionCloser interface {
 
 // SessionCloserHolder binds a SessionManager for deferred pilot hangup wiring.
 type SessionCloserHolder struct {
-	mgr *SessionManager
+	mgr     *SessionManager
+	profile CarrierProfile
 }
 
 // SetManager attaches the session manager after server construction.
@@ -55,9 +56,33 @@ func (h *SessionCloserHolder) SetManager(mgr *SessionManager) {
 	h.mgr = mgr
 }
 
+// SetCarrierProfile configures carrier-specific hangup signals (e.g. end_of_call).
+func (h *SessionCloserHolder) SetCarrierProfile(profile CarrierProfile) {
+	h.profile = profile
+}
+
 func (h *SessionCloserHolder) CloseSession(ctx context.Context, streamSID string) {
+	if h.mgr == nil {
+		return
+	}
+	if h.profile.Variant == CarrierAsterisk {
+		if session, ok := h.mgr.Get(streamSID); ok {
+			_ = session.SendEndOfCall()
+		}
+	}
+	h.mgr.Close(ctx, streamSID)
+}
+
+// EndCallSession sends end_of_call (when applicable) then closes the session.
+func (h *SessionCloserHolder) EndCallSession(ctx context.Context, session *Session) {
+	if session == nil {
+		return
+	}
+	if h.profile.Variant == CarrierAsterisk {
+		_ = session.SendEndOfCall()
+	}
 	if h.mgr != nil {
-		h.mgr.Close(ctx, streamSID)
+		h.mgr.Close(ctx, session.StreamSID)
 	}
 }
 

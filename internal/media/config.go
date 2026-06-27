@@ -23,6 +23,12 @@ type Config struct {
 	AudioBufferSize       int
 	TargetSampleRate      int
 	FrameDurationMs       int
+	Carrier               CarrierConfig
+}
+
+// CarrierProfile returns ingress/egress framing for the configured carrier.
+func (c Config) CarrierProfile() CarrierProfile {
+	return c.Carrier.Profile()
 }
 
 // DefaultConfig returns a Config populated with sensible CT-1 defaults.

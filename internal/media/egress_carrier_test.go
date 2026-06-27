@@ -50,7 +50,7 @@ func setupCarrierEgressTest(t *testing.T, clock Clock) (*CarrierEgress, *Session
 	cap := &outboundCapture{clock: clock}
 	cfg := DefaultEgressConfig()
 	cfg.JitterMs = 300
-	egress := NewCarrierEgress(cfg, 20, clock, nil, nil)
+	egress := NewCarrierEgress(cfg, 20, clock, nil, DefaultCarrierProfile(), nil)
 
 	mgr := NewSessionManager(DefaultConfig(), nil, func() AudioSink {
 		return NewLoggingSink(nil)
@@ -394,7 +394,7 @@ func TestFullDuplexInboundWhileOutbound(t *testing.T) {
 	waitForSession(t, srv, "MZ-DX")
 
 	clock := NewFakeClock(time.Now())
-	egress := NewCarrierEgress(DefaultEgressConfig(), 20, clock, nil, nil)
+	egress := NewCarrierEgress(DefaultEgressConfig(), 20, clock, nil, DefaultCarrierProfile(), nil)
 	session, ok := srv.Manager().Get("MZ-DX")
 	if !ok {
 		t.Fatal("session not found")

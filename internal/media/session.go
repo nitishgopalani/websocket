@@ -49,10 +49,11 @@ type Session struct {
 	outboundOnce     sync.Once
 }
 
-// outboundFrame is one serialized JSON message queued for the single outbound WS writer.
+// outboundFrame is one queued carrier websocket message for the single outbound writer.
 type outboundFrame struct {
 	data    []byte
 	isAudio bool
+	binary  bool
 }
 
 // FramesDropped returns the number of audio frames dropped due to backpressure.
@@ -265,20 +266,38 @@ func (m *SessionManager) CloseAll(ctx context.Context) {
 }
 
 func (s *Session) handleMark(ctx context.Context, evt MarkEvent) error {
+	return s.NotifyPlaybackComplete(ctx, evt.Mark.Name)
+}
+
+// NotifyPlaybackComplete forwards a local playback-complete signal (mark echo or derived).
+func (s *Session) NotifyPlaybackComplete(ctx context.Context, turnID string) error {
 	if s.playbackListener == nil {
 		return nil
 	}
-	s.playbackListener.OnPlaybackComplete(ctx, s, evt.Mark.Name)
+	s.playbackListener.OnPlaybackComplete(ctx, s, turnID)
 	return nil
 }
 
 // EnqueueOutbound enqueues a serialized outbound WS message (non-blocking).
 // When the buffer is full, the oldest queued audio frame is dropped and OutboundDropped increments.
 func (s *Session) EnqueueOutbound(data []byte, isAudio bool) {
-	if s.closed.Load() || len(data) == 0 {
+	s.enqueueOutboundFrame(outboundFrame{data: data, isAudio: isAudio, binary: false})
+}
+
+// EnqueueOutboundBinary enqueues raw binary audio for binary-carrier egress (e.g. Asterisk).
+func (s *Session) EnqueueOutboundBinary(data []byte) {
+	s.enqueueOutboundFrame(outboundFrame{data: data, isAudio: true, binary: true})
+}
+
+// EnqueueControl enqueues a text JSON control frame (ready, end_of_call, error).
+func (s *Session) EnqueueControl(data []byte) {
+	s.enqueueOutboundFrame(outboundFrame{data: data, isAudio: false, binary: false})
+}
+
+func (s *Session) enqueueOutboundFrame(item outboundFrame) {
+	if s.closed.Load() || len(item.data) == 0 {
 		return
 	}
-	item := outboundFrame{data: data, isAudio: isAudio}
 
 	s.outboundQueueMu.Lock()
 	if len(s.outboundQueue) < s.outboundCap {
@@ -368,7 +387,11 @@ func (s *Session) startOutboundWriter(conn *websocket.Conn) {
 							break
 						}
 						_ = conn.SetWriteDeadline(time.Now().Add(defaultWriteTimeout))
-						if err := conn.WriteMessage(websocket.TextMessage, item.data); err != nil {
+						msgType := websocket.TextMessage
+						if item.binary {
+							msgType = websocket.BinaryMessage
+						}
+						if err := conn.WriteMessage(msgType, item.data); err != nil {
 							s.logger.Debug("outbound write failed",
 								"stream_sid", s.StreamSID,
 								"error", err,
@@ -422,6 +445,69 @@ func (s *Session) drainAudio(ctx context.Context) {
 			return
 		}
 	}
+}
+
+func (m *SessionManager) HandleBinaryMedia(ctx context.Context, streamSID string, pcm []byte) error {
+	if streamSID == "" {
+		return fmt.Errorf("%w: binary media", ErrMissingStreamSID)
+	}
+	session, ok := m.Get(streamSID)
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrSessionNotFound, streamSID)
+	}
+	return session.enqueueRawMedia(ctx, pcm)
+}
+
+func (s *Session) enqueueRawMedia(ctx context.Context, frame []byte) error {
+	if s.closed.Load() {
+		return fmt.Errorf("%w: %s", ErrSessionNotFound, s.StreamSID)
+	}
+	if len(frame) == 0 {
+		return nil
+	}
+	atomic.AddInt64(&s.FramesIn, 1)
+	select {
+	case s.audioCh <- frame:
+		return nil
+	default:
+		select {
+		case <-s.audioCh:
+			atomic.AddInt64(&s.framesDropped, 1)
+			s.logger.Warn("dropping oldest audio frame due to backpressure",
+				"stream_sid", s.StreamSID,
+				"dropped_total", s.FramesDropped(),
+			)
+		default:
+		}
+		select {
+		case s.audioCh <- frame:
+			return nil
+		case <-s.stopCh:
+			return fmt.Errorf("%w: %s", ErrSessionNotFound, s.StreamSID)
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+// SendEndOfCall enqueues an Asterisk end_of_call control frame.
+func (s *Session) SendEndOfCall() error {
+	data, err := AsteriskEndOfCallMessage()
+	if err != nil {
+		return err
+	}
+	s.EnqueueControl(data)
+	return nil
+}
+
+// SendError enqueues an Asterisk error control frame.
+func (s *Session) SendError(message, code string) error {
+	data, err := AsteriskErrorMessage(message, code)
+	if err != nil {
+		return err
+	}
+	s.EnqueueControl(data)
+	return nil
 }
 
 func (s *Session) enqueueMedia(ctx context.Context, evt MediaEvent) error {

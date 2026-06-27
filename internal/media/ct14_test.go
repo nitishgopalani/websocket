@@ -108,4 +108,7 @@ func TestNewCarrierSerializerSelect(t *testing.T) {
 	if _, ok := media.NewCarrierSerializer(media.CarrierConfig{Variant: "exotel"}).(media.ExotelSerializer); !ok {
 		t.Fatal("exotel")
 	}
+	if _, ok := media.NewCarrierSerializer(media.CarrierConfig{Variant: "asterisk"}).(media.AsteriskSerializer); !ok {
+		t.Fatal("asterisk")
+	}
 }

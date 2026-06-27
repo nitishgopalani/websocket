@@ -22,7 +22,7 @@ func TestBootstrapOpenerOnStartWhenAMDDisabled(t *testing.T) {
 
 func TestBootstrapDefersOpenerWhenAMDEnabled(t *testing.T) {
 	ctrl := brain.NewCallControl(brain.CallControlConfig{AMDEnabled: true})
-	egress := media.NewCarrierEgress(media.DefaultEgressConfig(), 20, media.RealClock{}, nil, nil)
+	egress := media.NewCarrierEgress(media.DefaultEgressConfig(), 20, media.RealClock{}, nil, media.DefaultCarrierProfile(), nil)
 	ctrl.Bind(nil, nil, egress, nil)
 	sink := &brain.BootstrapSink{
 		AMDEnabled:    true,

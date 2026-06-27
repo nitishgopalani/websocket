@@ -53,9 +53,10 @@ type DeferredPlaybackEgress interface {
 	DefersPlaybackComplete() bool
 }
 
-// CarrierEgress implements AudioEgress: paced μ-law media, mark checkpoints, and clear for barge-in.
+// CarrierEgress implements AudioEgress: paced carrier media, mark checkpoints, and clear for barge-in.
 type CarrierEgress struct {
 	cfg        EgressConfig
+	profile    CarrierProfile
 	serializer CarrierSerializer
 	clock      Clock
 	logger     *slog.Logger
@@ -83,13 +84,16 @@ type CarrierEgress struct {
 }
 
 // NewCarrierEgress constructs carrier egress with injectable clock for deterministic tests.
-func NewCarrierEgress(cfg EgressConfig, frameDurationMs int, clock Clock, serializer CarrierSerializer, logger *slog.Logger) *CarrierEgress {
+func NewCarrierEgress(cfg EgressConfig, frameDurationMs int, clock Clock, serializer CarrierSerializer, profile CarrierProfile, logger *slog.Logger) *CarrierEgress {
 	cfg = cfg.withDefaults()
 	if clock == nil {
 		clock = RealClock{}
 	}
 	if serializer == nil {
 		serializer = NewCarrierSerializer(DefaultCarrierConfig())
+	}
+	if profile.Variant == "" {
+		profile = DefaultCarrierConfig().Profile()
 	}
 	if logger == nil {
 		logger = slog.Default()
@@ -102,13 +106,21 @@ func NewCarrierEgress(cfg EgressConfig, frameDurationMs int, clock Clock, serial
 	if sendAheadCap < 1 {
 		sendAheadCap = 1
 	}
-	sampleRate := defaultTargetSampleRate
-	frameBytes := sampleRate * frameDurationMs / 1000
+	sampleRate := profile.EgressSampleRate
+	if sampleRate <= 0 {
+		sampleRate = defaultTargetSampleRate
+	}
+	bytesPerSample := profile.EgressBytesPerSample
+	if bytesPerSample <= 0 {
+		bytesPerSample = 1
+	}
+	frameBytes := sampleRate * frameDurationMs / 1000 * bytesPerSample
 	if frameBytes < 1 {
 		frameBytes = 160
 	}
 	return &CarrierEgress{
 		cfg:          cfg,
+		profile:      profile,
 		serializer:   serializer,
 		clock:        clock,
 		logger:       logger,
@@ -244,6 +256,15 @@ func (e *CarrierEgress) ClearPlayback(_ context.Context, session *Session) error
 	if session == nil {
 		return nil
 	}
+	if !e.profile.BargeInFlushSupported {
+		if e.logger != nil {
+			e.logger.Warn("barge-in: no carrier flush; buffered audio may still play on Asterisk edge",
+				"stream_sid", session.StreamSID,
+				"BARGEIN_FLUSH_SUPPORTED", false,
+			)
+		}
+		return nil
+	}
 	data, err := e.serializer.Clear(session.StreamSID)
 	if err != nil {
 		return err
@@ -332,24 +353,10 @@ func (e *CarrierEgress) onTick() {
 		}
 		e.mu.Unlock()
 
-		data, err := e.serializer.Media(session.StreamSID, frame)
-		if err != nil {
-			if e.logger != nil {
-				e.logger.Warn("serialize media failed", "error", err)
-			}
-			return
-		}
-		session.EnqueueOutbound(data, true)
+		e.enqueueMediaFrame(session, frame)
 		e.markEgressFirstFrame(session.StreamSID)
 		if markTurn != "" {
-			markData, err := e.serializer.Mark(session.StreamSID, markTurn)
-			if err != nil {
-				if e.logger != nil {
-					e.logger.Warn("serialize mark failed", "error", err)
-				}
-				return
-			}
-			session.EnqueueOutbound(markData, false)
+			e.completePlaybackMark(session, markTurn)
 		}
 		return
 	}
@@ -358,14 +365,7 @@ func (e *CarrierEgress) onTick() {
 		e.pendingMark = ""
 		e.mu.Unlock()
 
-		data, err := e.serializer.Mark(session.StreamSID, turnID)
-		if err != nil {
-			if e.logger != nil {
-				e.logger.Warn("serialize mark failed", "error", err)
-			}
-			return
-		}
-		session.EnqueueOutbound(data, false)
+		e.completePlaybackMark(session, turnID)
 		return
 	}
 	e.mu.Unlock()
@@ -392,10 +392,7 @@ func (e *CarrierEgress) drainBurst() {
 				turnID := e.pendingMark
 				e.pendingMark = ""
 				e.mu.Unlock()
-				data, err := e.serializer.Mark(session.StreamSID, turnID)
-				if err == nil {
-					session.EnqueueOutbound(data, false)
-				}
+				e.completePlaybackMark(session, turnID)
 				return
 			}
 			e.mu.Unlock()
@@ -406,13 +403,41 @@ func (e *CarrierEgress) drainBurst() {
 		e.framesSent++
 		e.mu.Unlock()
 
-		data, err := e.serializer.Media(session.StreamSID, frame)
-		if err != nil {
-			continue
-		}
-		session.EnqueueOutbound(data, true)
+		e.enqueueMediaFrame(session, frame)
 		e.markEgressFirstFrame(session.StreamSID)
 	}
+}
+
+func (e *CarrierEgress) enqueueMediaFrame(session *Session, frame []byte) {
+	data, err := e.serializer.Media(session.StreamSID, frame)
+	if err != nil {
+		if e.logger != nil {
+			e.logger.Warn("serialize media failed", "error", err)
+		}
+		return
+	}
+	if e.profile.BinaryEgress {
+		session.EnqueueOutboundBinary(data)
+	} else {
+		session.EnqueueOutbound(data, true)
+	}
+}
+
+func (e *CarrierEgress) completePlaybackMark(session *Session, turnID string) {
+	if e.profile.RequiresMarkEcho {
+		markData, err := e.serializer.Mark(session.StreamSID, turnID)
+		if err != nil {
+			if e.logger != nil {
+				e.logger.Warn("serialize mark failed", "error", err)
+			}
+			return
+		}
+		if len(markData) > 0 {
+			session.EnqueueOutbound(markData, false)
+		}
+		return
+	}
+	_ = session.NotifyPlaybackComplete(context.Background(), turnID)
 }
 
 func (e *CarrierEgress) markEgressFirstFrame(sessionID string) {

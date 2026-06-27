@@ -6,13 +6,51 @@ import (
 )
 
 const (
-	CarrierFonada = "fonada"
-	CarrierExotel = "exotel"
+	CarrierFonada   = "fonada"
+	CarrierExotel   = "exotel"
+	CarrierAsterisk = "asterisk"
 )
 
-// CarrierConfig selects the outbound carrier JSON adapter.
+// CarrierConfig selects the outbound carrier adapter variant.
 type CarrierConfig struct {
 	Variant string
+}
+
+// CarrierProfile describes ingress/egress framing for a carrier variant.
+type CarrierProfile struct {
+	Variant               string
+	BinaryIngress         bool
+	BinaryEgress          bool
+	InputSampleRate       int
+	EgressSampleRate      int
+	EgressBytesPerSample  int
+	RequiresMarkEcho      bool
+	BargeInFlushSupported bool
+}
+
+// Profile returns runtime framing settings for the configured carrier.
+func (c CarrierConfig) Profile() CarrierProfile {
+	switch strings.ToLower(c.Variant) {
+	case CarrierAsterisk:
+		return CarrierProfile{
+			Variant:               CarrierAsterisk,
+			BinaryIngress:         true,
+			BinaryEgress:          true,
+			InputSampleRate:       16000,
+			EgressSampleRate:      24000,
+			EgressBytesPerSample:  2,
+			RequiresMarkEcho:      false,
+			BargeInFlushSupported: false,
+		}
+	default:
+		return CarrierProfile{
+			Variant:               c.Variant,
+			EgressSampleRate:      defaultTargetSampleRate,
+			EgressBytesPerSample:  1,
+			RequiresMarkEcho:      true,
+			BargeInFlushSupported: true,
+		}
+	}
 }
 
 // DefaultCarrierConfig returns Fonada as the pilot default.
@@ -20,7 +58,12 @@ func DefaultCarrierConfig() CarrierConfig {
 	return CarrierConfig{Variant: CarrierFonada}
 }
 
-// CarrierConfigFromEnv loads CARRIER (fonada|exotel).
+// DefaultCarrierProfile returns framing defaults for the default carrier (Fonada).
+func DefaultCarrierProfile() CarrierProfile {
+	return DefaultCarrierConfig().Profile()
+}
+
+// CarrierConfigFromEnv loads CARRIER (fonada|exotel|asterisk).
 func CarrierConfigFromEnv() CarrierConfig {
 	cfg := DefaultCarrierConfig()
 	if v := strings.TrimSpace(strings.ToLower(os.Getenv("CARRIER"))); v != "" {
@@ -34,6 +77,8 @@ func NewCarrierSerializer(cfg CarrierConfig) CarrierSerializer {
 	switch strings.ToLower(cfg.Variant) {
 	case CarrierExotel:
 		return ExotelSerializer{}
+	case CarrierAsterisk:
+		return AsteriskSerializer{}
 	default:
 		return FonadaSerializer{}
 	}

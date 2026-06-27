@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"sync"
 	"syscall"
 	"time"
 
@@ -110,115 +109,11 @@ func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		s.logger.Error("websocket upgrade failed", "error", err)
+	if s.cfg.CarrierProfile().BinaryIngress {
+		s.handleAsteriskWebSocket(w, r)
 		return
 	}
-
-	ctx := r.Context()
-	var activeStreamSID string
-	var closeOnce sync.Once
-	closeSession := func() {
-		closeOnce.Do(func() {
-			if activeStreamSID != "" {
-				s.manager.Close(ctx, activeStreamSID)
-				activeStreamSID = ""
-			}
-			_ = conn.Close()
-		})
-	}
-	defer closeSession()
-
-	conn.SetReadLimit(1 << 20)
-	_ = conn.SetReadDeadline(time.Now().Add(defaultReadTimeout))
-
-	for {
-		_, data, err := conn.ReadMessage()
-		if err != nil {
-			if !websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-				s.logger.Debug("websocket read ended", "error", err)
-			}
-			return
-		}
-
-		_ = conn.SetReadDeadline(time.Now().Add(defaultReadTimeout))
-
-		evt, err := ParseInboundEvent(data, s.logger)
-		if err != nil {
-			s.logger.Warn("failed to parse inbound event", "error", err)
-			continue
-		}
-
-		switch evt.Type {
-		case EventConnected:
-			s.logger.Info("stream connected")
-		case EventStart:
-			if evt.Start == nil {
-				s.logger.Warn("start event missing payload")
-				continue
-			}
-			session, err := s.manager.Create(ctx, *evt.Start, conn)
-			if err != nil {
-				if errors.Is(err, ErrMaxSessionsExceeded) {
-					s.logger.Warn("rejecting stream: max concurrent sessions exceeded",
-						"stream_sid", evt.Start.StreamSID,
-						"max", s.cfg.MaxConcurrentSessions,
-					)
-					_ = conn.WriteControl(
-						websocket.CloseMessage,
-						websocket.FormatCloseMessage(websocket.CloseTryAgainLater, "max sessions exceeded"),
-						time.Now().Add(defaultWriteTimeout),
-					)
-				} else {
-					s.logger.Warn("failed to create session", "error", err)
-					_ = conn.WriteControl(
-						websocket.CloseMessage,
-						websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "session rejected"),
-						time.Now().Add(defaultWriteTimeout),
-					)
-				}
-				return
-			}
-			activeStreamSID = session.StreamSID
-		case EventMedia:
-			if evt.Media == nil {
-				continue
-			}
-			if err := s.manager.HandleMedia(ctx, *evt.Media); err != nil {
-				s.logger.Warn("media handling failed", "error", err)
-			}
-		case EventDTMF:
-			if evt.DTMF == nil {
-				continue
-			}
-			if err := s.manager.HandleDTMF(ctx, *evt.DTMF); err != nil {
-				s.logger.Warn("dtmf handling failed", "error", err)
-			}
-		case EventMark:
-			if evt.Mark == nil {
-				continue
-			}
-			if err := s.manager.HandleMark(ctx, *evt.Mark); err != nil {
-				s.logger.Warn("mark handling failed", "error", err)
-			}
-		case EventStop:
-			if evt.Stop == nil {
-				continue
-			}
-			streamSID := evt.Stop.StreamSID
-			if streamSID == "" && activeStreamSID != "" {
-				streamSID = activeStreamSID
-			}
-			s.manager.Close(ctx, streamSID)
-			if streamSID == activeStreamSID {
-				activeStreamSID = ""
-			}
-			return
-		default:
-			// Unknown events are logged in ParseInboundEvent and ignored here.
-		}
-	}
+	s.handleExotelWebSocket(w, r)
 }
 
 // ServeHTTP allows tests to mount the server handler directly.

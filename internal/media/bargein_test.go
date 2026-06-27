@@ -353,7 +353,7 @@ func filterEvents(events []TurnEvent, kind TurnKind) []TurnEvent {
 
 func TestCarrierEgressPauseResume(t *testing.T) {
 	clock := NewFakeClock(time.Now())
-	egress := NewCarrierEgress(DefaultEgressConfig(), 20, clock, nil, nil)
+	egress := NewCarrierEgress(DefaultEgressConfig(), 20, clock, nil, DefaultCarrierProfile(), nil)
 	egress.Pause()
 	if !egress.Paused() {
 		t.Fatal("expected paused")
