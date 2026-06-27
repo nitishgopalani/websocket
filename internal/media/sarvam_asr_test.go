@@ -77,8 +77,11 @@ func TestSarvamSessionWithFakeServer(t *testing.T) {
 			t.Errorf("audio message: %v", err)
 			return
 		}
-		if msg.Encoding != "pcm_s16le" || msg.SampleRate != 8000 {
+		if msg.Audio.Encoding != sarvamMessageEncoding || msg.Audio.SampleRate != "8000" {
 			t.Errorf("unexpected audio message: %+v", msg)
+		}
+		if msg.Audio.Data == "" {
+			t.Error("expected base64 audio data")
 		}
 		audioFrames++
 
@@ -150,6 +153,9 @@ func TestSarvamSessionWithFakeServer(t *testing.T) {
 	}
 	if q.Get("model") != "saaras:v3" {
 		t.Fatalf("model = %q, want saaras:v3", q.Get("model"))
+	}
+	if q.Get("language-code") != "hi-IN" {
+		t.Fatalf("language-code = %q, want hi-IN", q.Get("language-code"))
 	}
 	if q.Get("vad_signals") != "true" {
 		t.Fatalf("vad_signals = %q, want true", q.Get("vad_signals"))

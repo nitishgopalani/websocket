@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -61,15 +63,9 @@ func (p *SarvamASRProvider) Open(ctx context.Context, meta ASRSessionMeta) (ASRS
 		events:   make(chan ASREvent, defaultASREventBuffer),
 		done:     make(chan struct{}),
 	}
-	if err := s.connect(ctx); err != nil {
-		return nil, err
-	}
+	// Lazy dial on first SendAudio — avoids idle close before ingress audio arrives.
 	s.wg.Add(1)
 	go s.readLoop()
-	if p.cfg.KeepalivePeriod > 0 {
-		s.wg.Add(1)
-		go s.keepaliveLoop()
-	}
 	return s, nil
 }
 
@@ -100,6 +96,8 @@ type sarvamSession struct {
 	reconnectMu  sync.Mutex
 	reconnecting bool
 
+	keepaliveOnce sync.Once
+
 	reconnectBuf [][]byte
 }
 
@@ -128,7 +126,9 @@ func (s *sarvamSession) SendAudio(pcm16 []byte) error {
 		return ErrInvalidPCM16Length
 	}
 	if s.conn == nil {
-		return s.bufferWhileDisconnected(pcm16)
+		if err := s.connectLocked(context.Background()); err != nil {
+			return s.bufferWhileDisconnectedLocked(pcm16, err)
+		}
 	}
 	if err := s.writeAudioLocked(pcm16); err != nil {
 		s.sendFailures.Add(1)
@@ -138,12 +138,18 @@ func (s *sarvamSession) SendAudio(pcm16 []byte) error {
 		)
 		_ = s.closeConnLocked()
 		s.scheduleReconnect(context.Background())
-		return s.bufferWhileDisconnected(pcm16)
+		return s.bufferWhileDisconnectedLocked(pcm16, nil)
 	}
 	return nil
 }
 
 func (s *sarvamSession) bufferWhileDisconnected(pcm16 []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.bufferWhileDisconnectedLocked(pcm16, nil)
+}
+
+func (s *sarvamSession) bufferWhileDisconnectedLocked(pcm16 []byte, dialErr error) error {
 	frame := make([]byte, len(pcm16))
 	copy(frame, pcm16)
 	if len(s.reconnectBuf) >= defaultASRReconnectBuffer {
@@ -152,6 +158,9 @@ func (s *sarvamSession) bufferWhileDisconnected(pcm16 []byte) error {
 	}
 	s.reconnectBuf = append(s.reconnectBuf, frame)
 	s.scheduleReconnect(context.Background())
+	if dialErr != nil {
+		return dialErr
+	}
 	return nil
 }
 
@@ -192,6 +201,13 @@ func (s *sarvamSession) Close() error {
 		return err
 	}
 	s.closed = true
+	conn := s.conn
+	s.mu.Unlock()
+
+	if conn != nil {
+		_ = s.sendFlush(conn)
+	}
+	s.mu.Lock()
 	_ = s.closeConnLocked()
 	s.mu.Unlock()
 
@@ -202,7 +218,7 @@ func (s *sarvamSession) Close() error {
 	return nil
 }
 
-func (s *sarvamSession) connect(ctx context.Context) error {
+func (s *sarvamSession) connectLocked(ctx context.Context) error {
 	if s.reconnectGiveUp.Load() {
 		return fmt.Errorf("sarvam reconnect exhausted")
 	}
@@ -212,15 +228,18 @@ func (s *sarvamSession) connect(ctx context.Context) error {
 		return fmt.Errorf("sarvam max dials (%d) reached for session", maxDials)
 	}
 	dialN := s.dialCount.Add(1)
-	s.logger.Info("sarvam ws dial",
-		"stream_sid", s.meta.StreamSID,
-		"dial", dialN,
-	)
 
-	wsURL, err := s.buildWSURL()
+	wsURL, queryLog, err := s.buildWSURL()
 	if err != nil {
 		return err
 	}
+	s.logger.Info("sarvam ws dial",
+		"stream_sid", s.meta.StreamSID,
+		"dial", dialN,
+		"url", maskSarvamWSURL(wsURL),
+		"query", queryLog,
+	)
+
 	header := http.Header{}
 	header.Set("api-subscription-key", s.apiKey)
 
@@ -229,46 +248,60 @@ func (s *sarvamSession) connect(ctx context.Context) error {
 		return fmt.Errorf("sarvam dial: %w", err)
 	}
 
-	s.mu.Lock()
 	s.conn = conn
 	buf := append([][]byte(nil), s.reconnectBuf...)
 	s.reconnectBuf = nil
-	s.mu.Unlock()
 
-	for _, frame := range buf {
-		s.mu.Lock()
-		err := s.writeAudioLocked(frame)
-		s.mu.Unlock()
-		if err != nil {
-			return err
-		}
-	}
 	s.logger.Info("sarvam ws connected",
 		"stream_sid", s.meta.StreamSID,
 		"dial", dialN,
+		"order", "connect->send_audio (no separate config frame; params in query string)",
 	)
+
+	for _, frame := range buf {
+		if err := s.writeAudioLocked(frame); err != nil {
+			return err
+		}
+	}
+
+	s.keepaliveOnce.Do(func() {
+		if s.cfg.KeepalivePeriod > 0 {
+			s.wg.Add(1)
+			go s.keepaliveLoop()
+		}
+	})
 	return nil
 }
 
-func (s *sarvamSession) buildWSURL() (string, error) {
+func (s *sarvamSession) buildWSURL() (raw string, queryLog string, err error) {
 	u, err := url.Parse(s.cfg.Endpoint)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	q := u.Query()
 	q.Set("model", s.cfg.Model)
 	q.Set("mode", s.cfg.Mode)
-	if s.meta.Language != "" && s.meta.Language != "unknown" {
-		q.Set("language_code", s.meta.Language)
-	} else if s.cfg.Language != "" && s.cfg.Language != "unknown" {
-		q.Set("language_code", s.cfg.Language)
+	lang := s.meta.Language
+	if lang == "" || lang == "unknown" {
+		lang = s.cfg.Language
+	}
+	if lang != "" && lang != "unknown" {
+		// AsyncAPI + SDK use hyphenated query key language-code (not language_code).
+		q.Set("language-code", lang)
 	}
 	q.Set("sample_rate", intString(s.meta.SampleRate))
 	q.Set("input_audio_codec", "pcm_s16le")
 	q.Set("vad_signals", boolString(s.cfg.VADSignals))
 	q.Set("high_vad_sensitivity", boolString(s.cfg.HighVADSensitivity))
 	u.RawQuery = q.Encode()
-	return u.String(), nil
+
+	parts := make([]string, 0, len(q))
+	for k, vals := range q {
+		for _, v := range vals {
+			parts = append(parts, fmt.Sprintf("%s=%s", k, v))
+		}
+	}
+	return u.String(), strings.Join(parts, "&"), nil
 }
 
 func (s *sarvamSession) writeAudioLocked(pcm16 []byte) error {
@@ -276,15 +309,36 @@ func (s *sarvamSession) writeAudioLocked(pcm16 []byte) error {
 		return fmt.Errorf("sarvam connection not ready")
 	}
 	msg := sarvamAudioMessage{
-		Audio:      base64.StdEncoding.EncodeToString(pcm16),
-		SampleRate: s.meta.SampleRate,
-		Encoding:   "pcm_s16le",
+		Audio: sarvamAudioPayload{
+			Data:       base64.StdEncoding.EncodeToString(pcm16),
+			SampleRate: intString(s.meta.SampleRate),
+			Encoding:   sarvamMessageEncoding,
+		},
 	}
 	payload, err := json.Marshal(msg)
 	if err != nil {
 		return err
 	}
+	s.logger.Info("sarvam ws send",
+		"stream_sid", s.meta.StreamSID,
+		"kind", "audio",
+		"pcm_bytes", len(pcm16),
+		"frame", truncateAudioFrameLog(payload),
+	)
 	return s.conn.WriteMessage(websocket.TextMessage, payload)
+}
+
+func (s *sarvamSession) sendFlush(conn *websocket.Conn) error {
+	payload, err := json.Marshal(sarvamFlushMessage{Type: "flush"})
+	if err != nil {
+		return err
+	}
+	s.logger.Info("sarvam ws send",
+		"stream_sid", s.meta.StreamSID,
+		"kind", "flush",
+		"frame", string(payload),
+	)
+	return conn.WriteMessage(websocket.TextMessage, payload)
 }
 
 func (s *sarvamSession) closeConnLocked() error {
@@ -320,14 +374,19 @@ func (s *sarvamSession) readLoop() {
 				return
 			default:
 			}
+			closeCode, closeReason := extractCloseInfo(err)
 			normalClose := websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway)
 			if normalClose {
-				s.logger.Info("sarvam ws closed normally",
+				s.logger.Info("sarvam ws closed",
 					"stream_sid", s.meta.StreamSID,
+					"close_code", closeCode,
+					"close_reason", closeReason,
 				)
 			} else {
 				s.logger.Warn("sarvam read ended; scheduling reconnect",
 					"stream_sid", s.meta.StreamSID,
+					"close_code", closeCode,
+					"close_reason", closeReason,
 					"error", err,
 				)
 			}
@@ -346,6 +405,11 @@ func (s *sarvamSession) readLoop() {
 			continue
 		}
 
+		s.logger.Info("sarvam ws recv",
+			"stream_sid", s.meta.StreamSID,
+			"at", time.Now().Format(time.RFC3339Nano),
+			"payload", truncateForLog(string(data), 512),
+		)
 		for _, evt := range parseSarvamMessages(data) {
 			s.emit(evt)
 		}
@@ -419,36 +483,34 @@ func (s *sarvamSession) tryReconnect(ctx context.Context) {
 
 		s.mu.Lock()
 		closed := s.closed
-		s.mu.Unlock()
-		if closed {
+		if !closed {
+			err := s.connectLocked(ctx)
+			if err != nil {
+				s.reconnectFails.Add(1)
+				s.mu.Unlock()
+				s.logger.Warn("sarvam reconnect failed",
+					"stream_sid", s.meta.StreamSID,
+					"attempt", failN+1,
+					"dials", s.dialCount.Load(),
+					"error", err,
+				)
+				if s.reconnectGiveUp.Load() {
+					s.emit(ASREvent{Type: ASREventError, Err: err})
+					return
+				}
+				continue
+			}
+			s.reconnects.Add(1)
+			GlobalMetrics().IncASRReconnect()
+			s.logger.Info("sarvam reconnected",
+				"stream_sid", s.meta.StreamSID,
+				"reconnects", s.Reconnects(),
+				"dials", s.dialCount.Load(),
+			)
+			s.mu.Unlock()
 			return
 		}
-
-		if err := s.connect(ctx); err != nil {
-			s.reconnectFails.Add(1)
-			s.logger.Warn("sarvam reconnect failed",
-				"stream_sid", s.meta.StreamSID,
-				"attempt", failN+1,
-				"dials", s.dialCount.Load(),
-				"error", err,
-			)
-			if s.reconnectGiveUp.Load() {
-				s.emit(ASREvent{
-					Type: ASREventError,
-					Err:  err,
-				})
-				return
-			}
-			continue
-		}
-
-		s.reconnects.Add(1)
-		GlobalMetrics().IncASRReconnect()
-		s.logger.Info("sarvam reconnected",
-			"stream_sid", s.meta.StreamSID,
-			"reconnects", s.Reconnects(),
-			"dials", s.dialCount.Load(),
-		)
+		s.mu.Unlock()
 		return
 	}
 }
@@ -486,21 +548,32 @@ func jitter(max time.Duration) time.Duration {
 	return time.Duration(rand.Int63n(int64(max)))
 }
 
+const sarvamMessageEncoding = "audio/wav"
+
 type sarvamAudioMessage struct {
-	Audio      string `json:"audio"`
-	SampleRate int    `json:"sample_rate"`
+	Audio sarvamAudioPayload `json:"audio"`
+}
+
+type sarvamAudioPayload struct {
+	Data       string `json:"data"`
+	SampleRate string `json:"sample_rate"`
 	Encoding   string `json:"encoding"`
 }
 
-type sarvamMessage struct {
-	Type string          `json:"type"`
-	Data json.RawMessage `json:"data"`
+type sarvamFlushMessage struct {
+	Type string `json:"type"`
 }
 
 type sarvamDataMessage struct {
 	Transcript string `json:"transcript"`
 	IsFinal    *bool  `json:"is_final"`
 	Final      *bool  `json:"final"`
+}
+
+type sarvamErrorData struct {
+	Error   string `json:"error"`
+	Code    string `json:"code"`
+	Message string `json:"message"`
 }
 
 type sarvamEventMessage struct {
@@ -519,6 +592,19 @@ func parseSarvamMessages(data []byte) []ASREvent {
 	}
 
 	switch msgType {
+	case "error":
+		var payload sarvamErrorData
+		if raw, ok := top["data"]; ok {
+			_ = json.Unmarshal(raw, &payload)
+		}
+		msg := payload.Error
+		if msg == "" {
+			msg = payload.Message
+		}
+		if msg == "" {
+			msg = string(data)
+		}
+		return []ASREvent{{Type: ASREventError, Err: fmt.Errorf("sarvam: %s", msg)}}
 	case "events":
 		var payload sarvamEventMessage
 		if raw, ok := top["data"]; ok {
@@ -569,4 +655,45 @@ func mapSarvamSignal(signal string) ASREvent {
 	default:
 		return ASREvent{Type: ASREventError, Err: fmt.Errorf("unknown sarvam signal: %s", signal)}
 	}
+}
+
+func maskSarvamWSURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	return u.Scheme + "://" + u.Host + u.Path + "?" + u.Query().Encode()
+}
+
+func extractCloseInfo(err error) (code int, reason string) {
+	if err == nil {
+		return 0, ""
+	}
+	var ce *websocket.CloseError
+	if errors.As(err, &ce) && ce != nil {
+		return ce.Code, ce.Text
+	}
+	return -1, err.Error()
+}
+
+func truncateAudioFrameLog(raw []byte) string {
+	var msg sarvamAudioMessage
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		return truncateForLog(string(raw), 256)
+	}
+	if len(msg.Audio.Data) > 48 {
+		msg.Audio.Data = msg.Audio.Data[:48] + "...(truncated)"
+	}
+	out, err := json.Marshal(msg)
+	if err != nil {
+		return truncateForLog(string(raw), 256)
+	}
+	return string(out)
+}
+
+func truncateForLog(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
 }
