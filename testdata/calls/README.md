@@ -7,7 +7,42 @@ Large audio files are **not** committed; add them locally or via your artifact s
 
 | Path | Purpose |
 |------|---------|
-| `smoke.ulaw` | Synthetic 50-frame μ-law silence sequence for carrier-simulator smoke |
+| `../smoke.ulaw` | Synthetic 50-frame μ-law silence sequence for carrier-simulator smoke |
+
+## L-9 AMD samples (local)
+
+| File | Purpose |
+|------|---------|
+| `human_synthetic.ulaw` | espeak-ng “Hello?” — **plumbing only** (SYNTHETIC) |
+| `voicemail_synthetic.ulaw` | espeak-ng voicemail phrase — **plumbing only** (SYNTHETIC) |
+| `human_real.ulaw` | **Real L-9 sign-off** — recorded live hello pickup (8 kHz mono μ-law) |
+| `voicemail_real.ulaw` | **Real L-9 sign-off** — recorded voicemail greeting |
+
+Large audio files are **not** committed; add real recordings locally.
+
+### Replay (one command)
+
+```bash
+# Workers + server + both samples; prints Whisper transcripts and AMD decisions
+bash scripts/replay_amd_l9.sh
+```
+
+Prefers `human_real.ulaw` / `voicemail_real.ulaw` when present; otherwise uses `human_synthetic.ulaw` / `voicemail_synthetic.ulaw`.
+
+Convert WAV → μ-law:
+
+```bash
+ffmpeg -y -i recording.wav -ar 8000 -ac 1 -f mulaw testdata/calls/human_real.ulaw
+```
+
+Watch classification:
+
+```bash
+tail -f scripts/workers.log | grep 'amd classify'
+```
+
+Expect `result=human` vs `result=machine` with `transcript=...` in the log line.
+Empty transcript → fail-open human (weak audio / wrong codec).
 
 ## Live eval layout (local / artifact)
 

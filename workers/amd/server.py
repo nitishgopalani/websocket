@@ -73,7 +73,15 @@ class WhisperAMDClassifier:
 
     def classify(self, pcm: np.ndarray, rate: int) -> dict:
         text = self._transcribe(pcm, rate)
-        return self._score_text(text)
+        result = self._score_text(text)
+        logger.info(
+            "amd classify transcript=%r result=%s proba_human=%.2f reason=%s",
+            text[:200],
+            result["result"],
+            result["proba_human"],
+            result["reason"][:160],
+        )
+        return result
 
     def _transcribe(self, pcm: np.ndarray, rate: int) -> str:
         if self._model is None or len(pcm) == 0:

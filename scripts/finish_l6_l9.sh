@@ -246,7 +246,7 @@ L9SIG="human->${HUMAN_DEC:-skip}; vm->${VM_DEC:-skip}"
 if echo "$HUMAN_DEC" | grep -q 'amd human' && echo "$VM_DEC" | grep -q 'amd machine'; then
   mark L-9 PASS "$L9SIG"
 elif echo "$HUMAN_DEC" | grep -q 'amd human' && [[ -n "$VM_DEC" ]]; then
-  mark L-9 DEGRADED "$L9SIG (voicemail not machine — AMD fail-open/CUDA libcublas?)"
+  mark L-9 DEGRADED "$L9SIG (voicemail not machine — check transcript in workers.log)"
 elif [[ -n "$HUMAN_DEC" && -n "$VM_DEC" ]]; then
   mark L-9 DEGRADED "$L9SIG"
 else

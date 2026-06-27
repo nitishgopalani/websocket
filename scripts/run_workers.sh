@@ -35,7 +35,16 @@ fi
 : > "$PID_FILE"
 
 start_worker denoise "127.0.0.1:9091"
-start_worker amd "127.0.0.1:9092" "WHISPER_DEVICE=cuda"
+
+# AMD: default CPU int8 — reliable in WSL2. CUDA 13.0 + CTranslate2 needs libcublas.so.12 (cuBLAS 12).
+# GPU path (optional, when cuBLAS 12 is available):
+#   pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
+#   export LD_LIBRARY_PATH="$(
+#     python3 -c \"import os,nvidia.cublas.lib,nvidia.cudnn.lib as c; print(':'.join([os.path.dirname(nvidia.cublas.lib.__file__), os.path.dirname(c.lib.__file__)]))\"
+#   ):\$LD_LIBRARY_PATH"
+#   start_worker amd "127.0.0.1:9092" "WHISPER_DEVICE=cuda"
+start_worker amd "127.0.0.1:9092" "WHISPER_DEVICE=cpu"
+
 start_worker semantic_turn "127.0.0.1:9093"
 
 sleep 2
