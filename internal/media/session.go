@@ -116,10 +116,17 @@ func (m *SessionManager) Get(streamSID string) (*Session, bool) {
 }
 
 func (m *SessionManager) updateActiveSessionsGauge() {
+	m.mu.RLock()
+	n := len(m.sessions)
+	m.mu.RUnlock()
+	m.setActiveSessionsGauge(n)
+}
+
+func (m *SessionManager) setActiveSessionsGauge(n int) {
 	if m.metrics == nil {
 		return
 	}
-	m.metrics.SetActiveSessions(m.Count())
+	m.metrics.SetActiveSessions(n)
 }
 
 // Create opens a session from a start event. When conn is non-nil the session starts its
@@ -161,7 +168,7 @@ func (m *SessionManager) Create(ctx context.Context, start StartEvent, conn *web
 
 	m.sessions[start.StreamSID] = session
 	session.SetMetrics(m.metrics)
-	m.updateActiveSessionsGauge()
+	m.setActiveSessionsGauge(len(m.sessions))
 	session.startWorker(ctx)
 	if conn != nil {
 		session.startOutboundWriter(conn)
