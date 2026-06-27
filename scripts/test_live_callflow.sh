@@ -13,7 +13,7 @@ exec > >(tee -a "$LOG") 2>&1
 echo "======== LIVE CALL-FLOW TEST — $(date -Iseconds) ========"
 
 load_env_stack "$ROOT"
-apply_conversation_test_env
+apply_conversation_test_env true true
 
 print_key_status
 require_keys || exit 1
@@ -77,7 +77,7 @@ bash "$ROOT/scripts/start_brain_stub.sh"
 
 echo "--- Step 3: Go server (live env) ---"
 load_env_stack "$ROOT"
-apply_conversation_test_env
+apply_conversation_test_env true true
 RUN_MARK="======== CALLFLOW RUN $(date -Iseconds) ========"
 : >>"$ROOT/scripts/pipeline_server.log"
 echo "$RUN_MARK" >>"$ROOT/scripts/pipeline_server.log"

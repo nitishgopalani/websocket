@@ -86,14 +86,47 @@ print_live_config() {
 }
 
 # Conversation-pipeline test overrides (AMD off, denoise passthrough).
+# Optional args: apply_conversation_test_env false false  # Part A (no Sarvam/ElevenLabs)
 apply_conversation_test_env() {
+  local asr_enabled="${1:-true}"
+  local tts_enabled="${2:-true}"
   export AMD_ENABLED=false
   export DENOISE_ENABLED=false
   export SEMANTIC_TURN_ENABLED=true
-  export ASR_ENABLED=true
-  export TTS_ENABLED=true
+  export ASR_ENABLED="$asr_enabled"
+  export TTS_ENABLED="$tts_enabled"
   export BRAIN_WS_ENABLED=true
   export BRAIN_WS_URL="${BRAIN_WS_URL:-ws://127.0.0.1:8000/ws/brain}"
   export EGRESS_PACING=realtime
   export METRICS_ENABLED=true
+}
+
+assert_boot_flags() {
+  local log_file="$1"
+  local want_denoise="$2"
+  local want_amd="$3"
+  local want_asr="$4"
+  local want_tts="$5"
+  local boot_line
+  boot_line="$(grep '"msg":"audio pipeline ready"' "$log_file" | tail -1 || true)"
+  if [[ -z "$boot_line" ]]; then
+    echo "ASSERT FAIL: no 'audio pipeline ready' line in $log_file"
+    return 1
+  fi
+  echo "BOOT LINE: $boot_line"
+  local fail=0
+  for pair in \
+    "denoise_enabled:$want_denoise" \
+    "amd_enabled:$want_amd" \
+    "asr_enabled:$want_asr" \
+    "tts_enabled:$want_tts"; do
+    local key="${pair%%:*}" want="${pair##*:}"
+    if ! echo "$boot_line" | grep -q "\"$key\":$want"; then
+      echo "ASSERT FAIL: expected $key=$want"
+      fail=1
+    else
+      echo "ASSERT OK: $key=$want"
+    fi
+  done
+  return "$fail"
 }
