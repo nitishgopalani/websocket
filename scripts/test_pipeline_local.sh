@@ -47,9 +47,10 @@ ensure_workers() {
 ensure_workers
 
 echo "Starting Go server with .env.local"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/load_env.sh"
 set -a
-# shellcheck disable=SC1090
-source "$ENV_FILE"
+load_env_local "$ENV_FILE"
 set +a
 go run ./cmd/server >> "$ROOT/scripts/pipeline_server.log" 2>&1 &
 SERVER_PID=$!

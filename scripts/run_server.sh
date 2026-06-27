@@ -8,9 +8,10 @@ cd "$ROOT"
 ENV_FILE="$ROOT/.env.local"
 if [[ -f "$ENV_FILE" ]]; then
   echo "Loading $ENV_FILE"
+  # shellcheck disable=SC1091
+  source "$ROOT/scripts/load_env.sh"
   set -a
-  # shellcheck disable=SC1090
-  source "$ENV_FILE"
+  load_env_local "$ENV_FILE"
   set +a
 else
   echo "WARN: $ENV_FILE not found — using process environment only"

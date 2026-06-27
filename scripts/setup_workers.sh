@@ -22,6 +22,23 @@ need_python() {
   echo "python3 version: $ver"
 }
 
+# deepfilterlib (DeepFilterNet) builds a Rust extension — need cargo on first install.
+ensure_rust() {
+  if command -v cargo >/dev/null 2>&1; then
+    echo "rust/cargo: $(cargo --version)"
+    return 0
+  fi
+  echo "=== Installing Rust + build tools (required for deepfilterlib) ==="
+  if command -v apt-get >/dev/null 2>&1; then
+    DEBIAN_FRONTEND=noninteractive apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl build-essential pkg-config
+  fi
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+  # shellcheck disable=SC1091
+  source "${HOME}/.cargo/env"
+  echo "rust/cargo: $(cargo --version)"
+}
+
 setup_worker() {
   local name="$1"
   shift
@@ -41,6 +58,9 @@ setup_worker() {
 }
 
 need_python
+ensure_rust
+# shellcheck disable=SC1091
+[[ -f "${HOME}/.cargo/env" ]] && source "${HOME}/.cargo/env"
 
 setup_worker denoise \
   pip install -r "$ROOT/workers/denoise/requirements.txt" \
@@ -82,9 +102,9 @@ else
   fi
 fi
 
-if [[ -f "$ROOT/workers/requirements-silero.txt" ]]; then
+if [[ -f "$ROOT/workers/requirements-silero.txt" && "${SILERO_SETUP:-0}" == "1" ]]; then
   echo ""
-  echo "=== Optional: Silero VAD ==="
+  echo "=== Optional: Silero VAD (set SILERO_SETUP=1; skipped by default) ==="
   SILERO_VENV="$ROOT/workers/.venv-silero"
   python3 -m venv "$SILERO_VENV"
   # shellcheck disable=SC1091
@@ -93,6 +113,10 @@ if [[ -f "$ROOT/workers/requirements-silero.txt" ]]; then
   pip install -r "$ROOT/workers/requirements-silero.txt"
   deactivate
   echo "Silero installed in $SILERO_VENV"
+else
+  echo ""
+  echo "=== Optional: Silero VAD — skipped (SILERO_SETUP=0). Reuse existing ONNX e.g."
+  echo "    /mnt/c/Users/nitis/source/repos/Another_testing/venv/Lib/site-packages/livekit/plugins/silero/resources/silero_vad.onnx"
 fi
 
 echo ""
