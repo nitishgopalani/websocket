@@ -8,4 +8,4 @@ export STUB_MODE=true
 export LLM_STUB=true
 nohup uvicorn app.main:app --host 0.0.0.0 --port 8000 > /tmp/brain.log 2>&1 &
 sleep 3
-curl -sf http://127.0.0.1:8000/healthz | grep -o '"llm_stub_mode":[^,]*'
+curl -sf http://127.0.0.1:8000/healthz | grep -q '"llm_stub_mode":true'

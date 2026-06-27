@@ -16,24 +16,33 @@ load_env_stack "$ROOT"
 if [[ ! -f "$ROOT/.env.live" && -f "$ROOT/.env.live.example" ]]; then
   load_env_local "$ROOT/.env.live.example"
 fi
-export WHISPER_MODEL="${WHISPER_MODEL:-tiny}"
-# WSL live callflow: denoise TCP per-frame adds backpressure; AMD classify needs headroom.
+export WHISPER_MODEL="${WHISPER_MODEL:-base}"
+# base on /mnt/c can exceed 4s; production target is base on fast disk/GPU under ~2s.
+export AMD_TIMEOUT_MS="${LIVE_CALLFLOW_AMD_TIMEOUT_MS:-12000}"
 export DENOISE_ENABLED="${LIVE_CALLFLOW_DENOISE:-false}"
-export AMD_TIMEOUT_MS="${LIVE_CALLFLOW_AMD_TIMEOUT_MS:-10000}"
 
 print_key_status
 require_keys || exit 1
 print_live_config
 echo ""
 
-echo "--- Step 1: preflight ---"
-if ! bash "$ROOT/scripts/preflight_live.sh"; then
-  echo "STOP: preflight failed — fix keys/services before call-flow test"
-  exit 1
+if [[ "${LIVE_CALLFLOW_SKIP_PREFLIGHT:-true}" == "true" ]]; then
+  echo "--- Step 1: preflight SKIPPED (single callflow — protect Sarvam quota) ---"
+else
+  echo "--- Step 1: preflight ---"
+  if ! bash "$ROOT/scripts/preflight_live.sh"; then
+    echo "STOP: preflight failed — fix keys/services before call-flow test"
+    exit 1
+  fi
 fi
 echo ""
 
-SPOKEN="$(bash "$ROOT/scripts/ensure_spoken_fixture.sh")"
+FIXTURE="${LIVE_CALLFLOW_FIXTURE:-$ROOT/testdata/calls/human_long.ulaw}"
+if [[ -f "$FIXTURE" ]]; then
+  SPOKEN="$FIXTURE"
+else
+  SPOKEN="$(bash "$ROOT/scripts/ensure_spoken_fixture.sh")"
+fi
 echo "Speech fixture: $SPOKEN"
 
 # Pad short fixtures with silence so AMD window + ASR receive speech before session stop.
@@ -76,14 +85,13 @@ wait_ports() {
 wait_workers_ready() {
   local deadline=$((SECONDS + 180))
   while (( SECONDS < deadline )); do
-    if grep -q 'denoise worker listening' "$ROOT/scripts/workers.log" 2>/dev/null &&
-       grep -q 'amd worker listening' "$ROOT/scripts/workers.log" 2>/dev/null &&
+    if grep -q "faster-whisper ${WHISPER_MODEL} loaded" "$ROOT/scripts/workers.log" 2>/dev/null &&
        grep -q 'semantic turn worker listening' "$ROOT/scripts/workers.log" 2>/dev/null; then
       return 0
     fi
     sleep 2
   done
-  echo "WARN: workers not all logged ready (denoise can take ~40s on first start)"
+  echo "WARN: workers not all logged ready (AMD base can take ~20s on /mnt/c)"
   return 1
 }
 
@@ -103,12 +111,20 @@ wait_ports || echo "WARN: worker ports not all open"
 wait_workers_ready || echo "WARN: worker log readiness timeout"
 
 echo "--- Step 3: brain (Collection) ---"
+bash "$ROOT/scripts/start_brain_stub.sh" 2>/dev/null || true
+sleep 2
 BRAIN_URL="${BRAIN_WS_URL:-ws://127.0.0.1:8000/ws/brain}"
 BRAIN_HTTP="${BRAIN_URL/ws:\/\//http:\/\/}"
 BRAIN_HTTP="${BRAIN_HTTP/\/ws\/brain/\/healthz}"
-if curl -sf --max-time 3 "$BRAIN_HTTP" >/dev/null 2>&1; then
-  echo "Brain health: OK ($BRAIN_HTTP)"
-else
+brain_deadline=$((SECONDS + 30))
+while (( SECONDS < brain_deadline )); do
+  if curl -sf --max-time 2 "$BRAIN_HTTP" 2>/dev/null | grep -q '"llm_stub_mode":true'; then
+    echo "Brain health: OK stub ($BRAIN_HTTP)"
+    break
+  fi
+  sleep 2
+done
+if ! curl -sf --max-time 2 "$BRAIN_HTTP" 2>/dev/null | grep -q '"llm_stub_mode":true'; then
   echo "WARN: brain not reachable at $BRAIN_HTTP"
   echo "Start Collection brain (separate terminal):"
   echo "  cd $(dirname "$ROOT")/Collection"
@@ -152,7 +168,7 @@ echo "--- Sarvam ASR (pipeline_server.log) ---"
 tail -n +"$BEFORE_LOG" "$ROOT/scripts/pipeline_server.log" | grep -E '"msg":"asr (partial|final|speech)' | tail -8 || echo "(none)"
 
 echo "--- Brain / reply (pipeline_server.log) ---"
-tail -n +"$BEFORE_LOG" "$ROOT/scripts/pipeline_server.log" | grep -E '"msg":"(reply chunk|brain chunk|egress audio)"' | tail -8 || echo "(none — check brain WS + opener-on-AMD-human)"
+tail -n +"$BEFORE_LOG" "$ROOT/scripts/pipeline_server.log" | grep -E '"msg":"(reply chunk|brain chunk|brain ws chunk|egress audio)"' | tail -8 || echo "(none — check brain WS + opener-on-AMD-human)"
 
 echo "--- ElevenLabs egress ---"
 EGRESS_BYTES=$(tail -n +"$BEFORE_LOG" "$ROOT/scripts/pipeline_server.log" | grep '"msg":"egress audio"' | wc -l || true)

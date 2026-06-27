@@ -14,8 +14,9 @@ const (
 	defaultASRMode            = "transcribe"
 	defaultASRLanguage        = "unknown"
 	defaultASRKeepalivePeriod = 25 * time.Second
-	defaultASRReconnectBase   = 500 * time.Millisecond
-	defaultASRReconnectMax    = 4 * time.Second
+	defaultASRReconnectBase   = 1 * time.Second
+	defaultASRReconnectMax    = 30 * time.Second
+	defaultASRMaxReconnects   = 5
 	defaultASREventBuffer     = 64
 	defaultASRReconnectBuffer = 8
 )
@@ -83,6 +84,7 @@ type ASRConfig struct {
 	KeepalivePeriod    time.Duration
 	ReconnectBaseDelay time.Duration
 	ReconnectMaxDelay  time.Duration
+	MaxReconnects      int
 }
 
 // SarvamConfig holds Sarvam-specific streaming settings.
@@ -96,6 +98,7 @@ type SarvamConfig struct {
 	KeepalivePeriod    time.Duration
 	ReconnectBaseDelay time.Duration
 	ReconnectMaxDelay  time.Duration
+	MaxReconnects      int
 }
 
 // DefaultASRConfig returns disabled ASR settings.
@@ -111,6 +114,7 @@ func DefaultASRConfig() ASRConfig {
 		KeepalivePeriod:    defaultASRKeepalivePeriod,
 		ReconnectBaseDelay: defaultASRReconnectBase,
 		ReconnectMaxDelay:  defaultASRReconnectMax,
+		MaxReconnects:      defaultASRMaxReconnects,
 	}
 }
 
@@ -166,6 +170,9 @@ func (c ASRConfig) withDefaults() ASRConfig {
 	if c.ReconnectMaxDelay <= 0 {
 		c.ReconnectMaxDelay = defaultASRReconnectMax
 	}
+	if c.MaxReconnects <= 0 {
+		c.MaxReconnects = defaultASRMaxReconnects
+	}
 	return c
 }
 
@@ -181,6 +188,7 @@ func (c ASRConfig) SarvamConfig() SarvamConfig {
 		KeepalivePeriod:    c.KeepalivePeriod,
 		ReconnectBaseDelay: c.ReconnectBaseDelay,
 		ReconnectMaxDelay:  c.ReconnectMaxDelay,
+		MaxReconnects:      c.MaxReconnects,
 	}
 }
 

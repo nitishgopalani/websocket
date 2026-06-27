@@ -44,7 +44,7 @@ start_worker denoise "127.0.0.1:9091"
 #   ):\$LD_LIBRARY_PATH"
 #   start_worker amd "127.0.0.1:9092" "WHISPER_DEVICE=cuda WHISPER_MODEL=base"
 # Production default: tiny (~745ms p50 on WSL CPU). Override with WHISPER_MODEL=base|small if needed.
-start_worker amd "127.0.0.1:9092" "WHISPER_DEVICE=cpu WHISPER_MODEL=${WHISPER_MODEL:-tiny}"
+start_worker amd "127.0.0.1:9092" "WHISPER_DEVICE=cpu WHISPER_MODEL=${WHISPER_MODEL:-base}"
 
 start_worker semantic_turn "127.0.0.1:9093"
 

@@ -90,9 +90,15 @@ type sarvamSession struct {
 	done   chan struct{}
 	wg     sync.WaitGroup
 
-	reconnects     atomic.Int64
-	droppedOnRetry atomic.Int64
-	sendFailures   atomic.Int64
+	reconnects      atomic.Int64
+	droppedOnRetry  atomic.Int64
+	sendFailures    atomic.Int64
+	dialCount       atomic.Int64
+	reconnectFails  atomic.Int64
+	reconnectGiveUp atomic.Bool
+
+	reconnectMu  sync.Mutex
+	reconnecting bool
 
 	reconnectBuf [][]byte
 }
@@ -131,6 +137,7 @@ func (s *sarvamSession) SendAudio(pcm16 []byte) error {
 			"error", err,
 		)
 		_ = s.closeConnLocked()
+		s.scheduleReconnect(context.Background())
 		return s.bufferWhileDisconnected(pcm16)
 	}
 	return nil
@@ -144,8 +151,37 @@ func (s *sarvamSession) bufferWhileDisconnected(pcm16 []byte) error {
 		s.reconnectBuf = s.reconnectBuf[1:]
 	}
 	s.reconnectBuf = append(s.reconnectBuf, frame)
-	go s.tryReconnect(context.Background())
+	s.scheduleReconnect(context.Background())
 	return nil
+}
+
+func (s *sarvamSession) maxReconnects() int {
+	if s.cfg.MaxReconnects > 0 {
+		return s.cfg.MaxReconnects
+	}
+	return defaultASRMaxReconnects
+}
+
+func (s *sarvamSession) scheduleReconnect(ctx context.Context) {
+	if s.reconnectGiveUp.Load() {
+		return
+	}
+	s.reconnectMu.Lock()
+	if s.reconnecting {
+		s.reconnectMu.Unlock()
+		return
+	}
+	s.reconnecting = true
+	s.reconnectMu.Unlock()
+
+	go func() {
+		defer func() {
+			s.reconnectMu.Lock()
+			s.reconnecting = false
+			s.reconnectMu.Unlock()
+		}()
+		s.tryReconnect(ctx)
+	}()
 }
 
 func (s *sarvamSession) Close() error {
@@ -167,6 +203,20 @@ func (s *sarvamSession) Close() error {
 }
 
 func (s *sarvamSession) connect(ctx context.Context) error {
+	if s.reconnectGiveUp.Load() {
+		return fmt.Errorf("sarvam reconnect exhausted")
+	}
+	maxDials := int64(1 + s.maxReconnects())
+	if s.dialCount.Load() >= maxDials {
+		s.reconnectGiveUp.Store(true)
+		return fmt.Errorf("sarvam max dials (%d) reached for session", maxDials)
+	}
+	dialN := s.dialCount.Add(1)
+	s.logger.Info("sarvam ws dial",
+		"stream_sid", s.meta.StreamSID,
+		"dial", dialN,
+	)
+
 	wsURL, err := s.buildWSURL()
 	if err != nil {
 		return err
@@ -193,6 +243,10 @@ func (s *sarvamSession) connect(ctx context.Context) error {
 			return err
 		}
 	}
+	s.logger.Info("sarvam ws connected",
+		"stream_sid", s.meta.StreamSID,
+		"dial", dialN,
+	)
 	return nil
 }
 
@@ -266,15 +320,29 @@ func (s *sarvamSession) readLoop() {
 				return
 			default:
 			}
-			s.logger.Warn("sarvam read ended; scheduling reconnect",
-				"stream_sid", s.meta.StreamSID,
-				"error", err,
-			)
+			normalClose := websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway)
+			if normalClose {
+				s.logger.Info("sarvam ws closed normally",
+					"stream_sid", s.meta.StreamSID,
+				)
+			} else {
+				s.logger.Warn("sarvam read ended; scheduling reconnect",
+					"stream_sid", s.meta.StreamSID,
+					"error", err,
+				)
+			}
 			s.mu.Lock()
 			_ = s.closeConnLocked()
+			hasBuf := len(s.reconnectBuf) > 0
 			s.mu.Unlock()
-			go s.tryReconnect(context.Background())
-			time.Sleep(100 * time.Millisecond)
+			if !normalClose || hasBuf {
+				s.scheduleReconnect(context.Background())
+			}
+			select {
+			case <-s.done:
+				return
+			case <-time.After(500 * time.Millisecond):
+			}
 			continue
 		}
 
@@ -299,7 +367,7 @@ func (s *sarvamSession) keepaliveLoop() {
 				err := conn.WriteControl(websocket.PingMessage, []byte("ping"), time.Now().Add(5*time.Second))
 				if err != nil {
 					_ = s.closeConnLocked()
-					go s.tryReconnect(context.Background())
+					s.scheduleReconnect(context.Background())
 				}
 			}
 			s.mu.Unlock()
@@ -319,7 +387,7 @@ func (s *sarvamSession) tryReconnect(ctx context.Context) {
 	}
 	s.mu.Unlock()
 
-	attempt := 0
+	maxAttempts := s.maxReconnects()
 	for {
 		select {
 		case <-s.done:
@@ -327,7 +395,26 @@ func (s *sarvamSession) tryReconnect(ctx context.Context) {
 		default:
 		}
 
-		delay := backoffDelay(s.cfg.ReconnectBaseDelay, s.cfg.ReconnectMaxDelay, attempt)
+		if s.reconnectGiveUp.Load() {
+			return
+		}
+
+		failN := int(s.reconnectFails.Load())
+		if failN >= maxAttempts {
+			s.reconnectGiveUp.Store(true)
+			s.logger.Error("sarvam reconnect exhausted; giving up",
+				"stream_sid", s.meta.StreamSID,
+				"attempts", failN,
+				"dials", s.dialCount.Load(),
+			)
+			s.emit(ASREvent{
+				Type: ASREventError,
+				Err:  fmt.Errorf("sarvam reconnect exhausted after %d attempts", failN),
+			})
+			return
+		}
+
+		delay := backoffDelay(s.cfg.ReconnectBaseDelay, s.cfg.ReconnectMaxDelay, failN)
 		time.Sleep(delay)
 
 		s.mu.Lock()
@@ -338,13 +425,20 @@ func (s *sarvamSession) tryReconnect(ctx context.Context) {
 		}
 
 		if err := s.connect(ctx); err != nil {
+			s.reconnectFails.Add(1)
 			s.logger.Warn("sarvam reconnect failed",
 				"stream_sid", s.meta.StreamSID,
-				"attempt", attempt+1,
+				"attempt", failN+1,
+				"dials", s.dialCount.Load(),
 				"error", err,
 			)
-			s.emit(ASREvent{Type: ASREventError, Err: err})
-			attempt++
+			if s.reconnectGiveUp.Load() {
+				s.emit(ASREvent{
+					Type: ASREventError,
+					Err:  err,
+				})
+				return
+			}
 			continue
 		}
 
@@ -353,6 +447,7 @@ func (s *sarvamSession) tryReconnect(ctx context.Context) {
 		s.logger.Info("sarvam reconnected",
 			"stream_sid", s.meta.StreamSID,
 			"reconnects", s.Reconnects(),
+			"dials", s.dialCount.Load(),
 		)
 		return
 	}

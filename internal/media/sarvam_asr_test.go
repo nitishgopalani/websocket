@@ -181,6 +181,7 @@ func TestSarvamReconnectOnDrop(t *testing.T) {
 		KeepalivePeriod:    0,
 		ReconnectBaseDelay: 50 * time.Millisecond,
 		ReconnectMaxDelay:  200 * time.Millisecond,
+		MaxReconnects:      3,
 	}, nil)
 
 	sess, err := provider.Open(context.Background(), ASRSessionMeta{
