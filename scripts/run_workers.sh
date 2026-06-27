@@ -42,8 +42,9 @@ start_worker denoise "127.0.0.1:9091"
 #   export LD_LIBRARY_PATH="$(
 #     python3 -c \"import os,nvidia.cublas.lib,nvidia.cudnn.lib as c; print(':'.join([os.path.dirname(nvidia.cublas.lib.__file__), os.path.dirname(c.lib.__file__)]))\"
 #   ):\$LD_LIBRARY_PATH"
-#   start_worker amd "127.0.0.1:9092" "WHISPER_DEVICE=cuda"
-start_worker amd "127.0.0.1:9092" "WHISPER_DEVICE=cpu"
+#   start_worker amd "127.0.0.1:9092" "WHISPER_DEVICE=cuda WHISPER_MODEL=base"
+# Production default: tiny (~745ms p50 on WSL CPU). Override with WHISPER_MODEL=base|small if needed.
+start_worker amd "127.0.0.1:9092" "WHISPER_DEVICE=cpu WHISPER_MODEL=${WHISPER_MODEL:-tiny}"
 
 start_worker semantic_turn "127.0.0.1:9093"
 

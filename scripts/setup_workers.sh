@@ -71,10 +71,10 @@ setup_worker amd \
   pip install -r "$ROOT/workers/amd/requirements.txt"
 
 echo ""
-echo "=== Pre-caching faster-whisper small (CPU int8 for build-time cache) ==="
+echo "=== Pre-caching faster-whisper base (CPU int8 — default WHISPER_MODEL) ==="
 # shellcheck disable=SC1091
 source "$ROOT/workers/amd/.venv/bin/activate"
-python -c "from faster_whisper import WhisperModel; WhisperModel('small', device='cpu', compute_type='int8')"
+python -c "from faster_whisper import WhisperModel; WhisperModel('base', device='cpu', compute_type='int8')"
 deactivate
 echo "NOTE: AMD defaults to WHISPER_DEVICE=cpu in run_workers.sh (CUDA 13 / cuBLAS 12 gap)."
 echo "      For GPU: pip install nvidia-cublas-cu12 nvidia-cudnn-cu12 and set WHISPER_DEVICE=cuda."

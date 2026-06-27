@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Whisper-small AMD worker — length-prefixed PCM16 over UDS or TCP.
+"""Whisper AMD worker — length-prefixed PCM16 over UDS or TCP.
 
 Wire protocol (matches Go internal/media/amd.go / denoise request format):
   Request:  [uint32 len LE][uint16 rate_hz LE][pcm16 bytes]   len = 2 + pcm_bytes
@@ -7,6 +7,7 @@ Wire protocol (matches Go internal/media/amd.go / denoise request format):
             {"result":"human"|"machine"|"unknown","proba_human":0.0-1.0,"reason":"..."}
 
 Defaults favor human precision: proba_human < threshold -> machine only when confident.
+AMD transcribes only the first ~2s (AMD_WINDOW_MS) — tiny/base models are sufficient on CPU.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ import os
 import re
 import socket
 import struct
+import time
 from typing import Tuple
 
 import numpy as np
@@ -28,6 +30,9 @@ HEADER = struct.Struct("<I")
 RATE_FIELD = struct.Struct("<H")
 
 DEFAULT_THRESHOLD = float(os.environ.get("AMD_PROBA_HUMAN_THRESHOLD", "0.4"))
+ALLOWED_WHISPER_MODELS = frozenset({"tiny", "base", "small"})
+DEFAULT_WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "base").strip().lower()
+DEFAULT_AMD_WINDOW_MS = int(os.environ.get("AMD_WINDOW_MS", "2000"))
 
 VOICEMAIL_PATTERNS = [
     r"leave a message",
@@ -43,11 +48,21 @@ VOICEMAIL_PATTERNS = [
 ]
 
 
+def resolve_whisper_model(name: str) -> str:
+    model = name.strip().lower()
+    if model not in ALLOWED_WHISPER_MODELS:
+        logger.warning("unknown WHISPER_MODEL=%r; using base", name)
+        return "base"
+    return model
+
+
 class WhisperAMDClassifier:
-    """Transcribes ~2s audio with faster-whisper small and keyword-scores voicemail."""
+    """Transcribes the AMD window with faster-whisper and keyword-scores voicemail."""
 
     def __init__(self, threshold: float = DEFAULT_THRESHOLD) -> None:
         self.threshold = threshold
+        self.window_ms = DEFAULT_AMD_WINDOW_MS
+        self.model_name = resolve_whisper_model(DEFAULT_WHISPER_MODEL)
         self._model = None
         device = os.environ.get("WHISPER_DEVICE", "cpu").strip().lower()
         compute_type = "float16" if device == "cuda" else "int8"
@@ -55,13 +70,23 @@ class WhisperAMDClassifier:
             from faster_whisper import WhisperModel
 
             try:
-                self._model = WhisperModel("small", device=device, compute_type=compute_type)
-                logger.info("faster-whisper small loaded (device=%s, compute_type=%s)", device, compute_type)
+                self._model = WhisperModel(self.model_name, device=device, compute_type=compute_type)
+                logger.info(
+                    "faster-whisper %s loaded (device=%s, compute_type=%s, window_ms=%d)",
+                    self.model_name,
+                    device,
+                    compute_type,
+                    self.window_ms,
+                )
             except Exception as cuda_exc:  # noqa: BLE001
                 if device == "cuda":
                     logger.warning("CUDA init failed (%s); falling back to CPU int8", cuda_exc)
-                    self._model = WhisperModel("small", device="cpu", compute_type="int8")
-                    logger.info("faster-whisper small loaded (device=cpu, compute_type=int8)")
+                    self._model = WhisperModel(self.model_name, device="cpu", compute_type="int8")
+                    logger.info(
+                        "faster-whisper %s loaded (device=cpu, compute_type=int8, window_ms=%d)",
+                        self.model_name,
+                        self.window_ms,
+                    )
                 else:
                     raise
         except Exception as exc:  # noqa: BLE001
@@ -72,16 +97,26 @@ class WhisperAMDClassifier:
         return self._model is not None
 
     def classify(self, pcm: np.ndarray, rate: int) -> dict:
+        t0 = time.perf_counter()
+        pcm = self._truncate_pcm(pcm, rate)
         text = self._transcribe(pcm, rate)
         result = self._score_text(text)
+        latency_ms = int((time.perf_counter() - t0) * 1000)
         logger.info(
-            "amd classify transcript=%r result=%s proba_human=%.2f reason=%s",
+            "amd classify transcript=%r result=%s proba_human=%.2f latency_ms=%d reason=%s",
             text[:200],
             result["result"],
             result["proba_human"],
-            result["reason"][:160],
+            latency_ms,
+            result["reason"][:120],
         )
         return result
+
+    def _truncate_pcm(self, pcm: np.ndarray, rate: int) -> np.ndarray:
+        max_samples = max(1, int(rate * self.window_ms / 1000))
+        if len(pcm) > max_samples:
+            return pcm[:max_samples]
+        return pcm
 
     def _transcribe(self, pcm: np.ndarray, rate: int) -> str:
         if self._model is None or len(pcm) == 0:
@@ -190,7 +225,7 @@ def serve(bind: str, use_unix: bool, classifier: WhisperAMDClassifier) -> None:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    parser = argparse.ArgumentParser(description="Whisper-small AMD worker")
+    parser = argparse.ArgumentParser(description="Whisper AMD worker (faster-whisper)")
     parser.add_argument("--socket", default=os.environ.get("AMD_SOCKET", ""), help="Unix domain socket path")
     parser.add_argument("--addr", default=os.environ.get("AMD_ADDR", "127.0.0.1:9092"), help="TCP listen address")
     parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD, help="Human precision threshold")

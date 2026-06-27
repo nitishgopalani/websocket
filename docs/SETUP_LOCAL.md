@@ -22,7 +22,7 @@ Inside WSL2:
 
 | Component | Device | Notes |
 |-----------|--------|-------|
-| AMD (faster-whisper small) | **CPU (default)** | `WHISPER_DEVICE=cpu` in `run_workers.sh`; optional CUDA with cuBLAS 12 |
+| AMD (faster-whisper) | **CPU tiny (default)** | `WHISPER_MODEL=tiny` in `run_workers.sh`; `base`/`small` via env; `bash scripts/bench_amd.sh` |
 | Denoise (DeepFilterNet3) | **CPU** | Installed via PyTorch CPU wheels |
 | Semantic turn (smart-turn ONNX) | **CPU** | `onnxruntime` CPU; optional `onnxruntime-gpu` |
 | Silero VAD (optional) | **CPU** | `workers/requirements-silero.txt` |
@@ -154,10 +154,9 @@ Run workers **only in WSL2** (`bash scripts/setup_workers.sh`). DeepFilterNet + 
 
 ### faster-whisper CUDA / libcublas.so.12
 
-- **Default:** `WHISPER_DEVICE=cpu` in `run_workers.sh` (int8, first ~2 s AMD only).
-- CUDA 13.0 in WSL2 often lacks matching **cuBLAS 12** for CTranslate2 → inference fail-open.
+- **Default:** `WHISPER_DEVICE=cpu`, `WHISPER_MODEL=tiny` (int8, first ~2 s via `AMD_WINDOW_MS=2000`).
+- **Latency:** `bash scripts/bench_amd.sh` — compare tiny/base/small p50/p95; set `AMD_TIMEOUT_MS` ~4× p95 (default 4000 ms for tiny).
 - Optional GPU: `pip install nvidia-cublas-cu12 nvidia-cudnn-cu12`, set `LD_LIBRARY_PATH`, then `WHISPER_DEVICE=cuda` in `run_workers.sh`.
-- Worker auto-falls back to CPU int8 on CUDA init failure and logs `CUDA init failed`.
 
 ### smart-turn ONNX download fails
 

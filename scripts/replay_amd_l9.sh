@@ -77,12 +77,11 @@ echo "Waiting for worker ports..."
 wait_ports || echo "WARN: not all worker ports open"
 wait_amd_ready || echo "WARN: AMD worker not listening yet"
 
-AMD_DEVICE="$(grep -E 'faster-whisper small loaded' scripts/workers.log | tail -1 || true)"
+AMD_DEVICE="$(grep -E 'faster-whisper .* loaded' scripts/workers.log | tail -1 || true)"
 echo "AMD startup: ${AMD_DEVICE:-unknown}"
 
 set -a
 load_env_local "$ROOT/.env.local"
-export AMD_TIMEOUT_MS="${AMD_TIMEOUT_MS:-60000}"
 set +a
 : >>scripts/pipeline_server.log
 go run ./cmd/server >>scripts/pipeline_server.log 2>&1 &
@@ -111,8 +110,8 @@ replay_one() {
     -call-sid "$sid" \
     -timeout 120s || true
   [[ "$padded" != "$file" ]] && rm -f "$padded"
-  echo "Waiting for AMD classify (CPU Whisper can take ~15-45s)..."
-  local deadline=$((SECONDS + 90))
+  echo "Waiting for AMD classify..."
+  local deadline=$((SECONDS + 30))
   while (( SECONDS < deadline )); do
     if tail -n +"$((before + 1))" scripts/workers.log 2>/dev/null | grep -q 'amd classify'; then
       break
@@ -120,7 +119,7 @@ replay_one() {
     sleep 2
   done
   echo "AMD worker lines:"
-  tail -n +"$((before + 1))" scripts/workers.log | grep -E 'amd classify|faster-whisper|error_fail_open|libcublas' || true
+  tail -n +"$((before + 1))" scripts/workers.log | grep -E 'amd classify|error_fail_open|libcublas' || true
   echo "Pipeline AMD lines:"
   grep -E '"msg":"amd (human|machine)' scripts/pipeline_server.log | tail -2 || true
 }

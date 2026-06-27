@@ -46,7 +46,7 @@ if workers/denoise/.venv/bin/python -c "from df.enhance import enhance, init_df"
   DENOISE_IMPORT=OK
 fi
 WHISPER_CACHE=unknown
-if workers/amd/.venv/bin/python -c "from faster_whisper import WhisperModel; WhisperModel('small', device='cpu', compute_type='int8')" 2>/dev/null; then
+if workers/amd/.venv/bin/python -c "from faster_whisper import WhisperModel; WhisperModel('base', device='cpu', compute_type='int8')" 2>/dev/null; then
   WHISPER_CACHE=OK
 fi
 ONNX_PRESENT=no
