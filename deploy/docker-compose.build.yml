@@ -6,7 +6,7 @@ services:
   brain:
     build:
       context: ../../Collection
-      dockerfile: docker/Dockerfile.brain
+      dockerfile: ../Websocket/deploy/docker/Dockerfile.brain
     image: fonada/voice-brain:latest
 
   denoise:

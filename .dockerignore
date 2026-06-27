@@ -1,5 +1,9 @@
+# Keep deploy/cmd/smoke in build context; exclude ship artifacts and secrets.
+deploy/**
+!deploy/cmd
+!deploy/cmd/**
+
 scripts/
-deploy/
 *.tar
 *.tar.gz
 .git
@@ -9,3 +13,9 @@ deploy/
 **/__pycache__
 **/.venv
 **/.pytest_cache
+**/*.log
+**/*.pyc
+**/.git
+workers/**/models
+workers/**/checkpoints
+testdata/**

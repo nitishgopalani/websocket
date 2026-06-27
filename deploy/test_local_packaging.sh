@@ -35,9 +35,11 @@ cleanup() {
   echo ""
   echo "--- docker compose down ---"
   docker compose --env-file "$PACK_ENV" down -v --remove-orphans 2>/dev/null || true
-  rm -f "$PACK_ENV"
+  rm -f "$PACK_ENV" "$DEPLOY/.env"
 }
 trap cleanup EXIT
+
+cp "$PACK_ENV" "$DEPLOY/.env"
 
 echo "--- Step 1: build images (minimal asterisk stack) ---"
 if ! docker compose -f docker-compose.build.yml build brain semantic-turn go-server smoke; then
