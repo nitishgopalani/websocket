@@ -91,6 +91,12 @@ while (( SECONDS < deadline )); do
 done
 port_open 8080 || { echo "FAIL: server not on :8080"; tail -15 "$ROOT/scripts/pipeline_server.log"; exit 1; }
 
+echo "--- Step 3b: assert boot flags ---"
+if ! assert_boot_flags "$ROOT/scripts/pipeline_server.log" false false true true true; then
+  echo "STOP: boot flags wrong — fix env overlay before callflow"
+  exit 1
+fi
+
 echo "--- Step 4: local preflight (no Sarvam call) ---"
 if ! bash "$ROOT/scripts/preflight_local.sh"; then
   echo "STOP: preflight not green — fix startup before callflow (protects Sarvam quota)"
@@ -115,7 +121,7 @@ sleep 45
 PIPE_LOG="$(tail -n +"$BEFORE_LOG" "$ROOT/scripts/pipeline_server.log")"
 
 echo ""
-echo "======== RESULTS ========"
+echo "======== FULL CHAIN RESULTS ========"
 
 # Sarvam rate limit check (avoid matching unrelated log fields like target_sample_rate)
 if echo "$PIPE_LOG" | grep -qiE 'Rate limit exceeded|HTTP 429|"status":429'; then
@@ -123,63 +129,123 @@ if echo "$PIPE_LOG" | grep -qiE 'Rate limit exceeded|HTTP 429|"status":429'; the
   exit 2
 fi
 
-echo "--- Sarvam ASR (pipeline_server.log) ---"
-echo "$PIPE_LOG" | grep -E '"msg":"asr (partial|final|speech)' | tail -12 || echo "(none)"
-SARVAM_FINAL="$(echo "$PIPE_LOG" | grep '"msg":"asr final"' | tail -1 || true)"
-SARVAM_PARTIAL="$(echo "$PIPE_LOG" | grep '"msg":"asr partial"' | tail -3 || true)"
+REF_LINE=""
+if [[ -f "$REF_TEXT" ]]; then
+  REF_LINE="$(tr -d '\r\n' <"$REF_TEXT")"
+fi
 
-echo "--- Turn-taking ---"
-echo "$PIPE_LOG" | grep '"msg":"turn event"' | grep 'end_of_turn' | tail -5 || echo "(no end_of_turn logged)"
+echo ""
+echo "=== 1. Sarvam ASR ==="
+echo "$PIPE_LOG" | grep -E '"msg":"asr (partial|final|speech)' | tail -15 || echo "(no structured asr partial/final — TurnManager consumes ASR directly)"
+SARVAM_WS_LINES="$(echo "$PIPE_LOG" | grep 'sarvam ws recv' | grep '"transcript":' || true)"
+if [[ -n "$SARVAM_WS_LINES" ]]; then
+  echo "--- sarvam ws recv (transcript segments) ---"
+  echo "$SARVAM_WS_LINES" | sed 's/.*"transcript":"\([^"]*\)".*/  segment: \1/' | tail -10
+fi
+SARVAM_FINAL_LINE="$(echo "$PIPE_LOG" | grep '"msg":"asr final"' | tail -1 || true)"
+SARVAM_FINAL_TEXT="$(echo "$SARVAM_FINAL_LINE" | grep -oE '"text":"[^"]*"' | tail -1 | cut -d'"' -f4 || true)"
+if [[ -z "$SARVAM_FINAL_TEXT" && -n "$SARVAM_WS_LINES" ]]; then
+  SARVAM_FINAL_TEXT="$(echo "$SARVAM_WS_LINES" | sed -n 's/.*"transcript":"\([^"]*\)".*/\1/p' | tail -1)"
+  SARVAM_MERGED="$(echo "$SARVAM_WS_LINES" | sed -n 's/.*"transcript":"\([^"]*\)".*/\1/p' | paste -sd' ' -)"
+  echo "Merged WS segments: ${SARVAM_MERGED:0:120}..."
+fi
+if [[ -z "$SARVAM_FINAL_TEXT" && -n "$SARVAM_FINAL_LINE" ]]; then
+  SARVAM_FINAL_TEXT="$(echo "$SARVAM_FINAL_LINE" | sed -n 's/.*"text":\([^,}]*\).*/\1/p' | tr -d '"')"
+fi
+echo "FINAL transcript: ${SARVAM_FINAL_TEXT:-(missing)}"
+if [[ -n "$REF_LINE" && -n "$SARVAM_FINAL_TEXT" ]]; then
+  if echo "$SARVAM_FINAL_TEXT" | grep -qi "payment"; then
+    echo "Reference match: partial/full (contains 'payment')"
+  else
+    echo "Reference match: NO (expected snippet with 'payment' from ref)"
+  fi
+fi
+LINK1=pass
+[[ -n "$SARVAM_FINAL_TEXT" || -n "$SARVAM_WS_LINES" ]] || LINK1=fail
 
-echo "--- Brain / reply (pipeline_server.log) ---"
-echo "$PIPE_LOG" | grep -E '"msg":"(reply chunk|reply done|reply error)"' | tail -10 || echo "(none)"
+echo ""
+echo "=== 2. Turn-taking (EndOfTurn) ==="
+EOT_LINES="$(echo "$PIPE_LOG" | grep '"msg":"turn event"' | grep 'end_of_turn' || true)"
+if [[ -n "$EOT_LINES" ]]; then
+  echo "$EOT_LINES" | tail -5
+  EOT_COUNT=$(echo "$EOT_LINES" | wc -l | tr -d ' ')
+  echo "EndOfTurn count: $EOT_COUNT"
+else
+  echo "(no end_of_turn logged)"
+fi
+LINK2=pass
+echo "$EOT_LINES" | grep -q end_of_turn || LINK2=fail
 
-echo "--- ElevenLabs egress ---"
+echo ""
+echo "=== 3. Brain (EB-6) reply chunks ==="
+REPLY_LINES="$(echo "$PIPE_LOG" | grep -E '"msg":"(reply chunk|reply done|reply error)"' || true)"
+if [[ -n "$REPLY_LINES" ]]; then
+  echo "$REPLY_LINES" | tail -12
+  REPLY_CHUNKS=$(echo "$REPLY_LINES" | grep -c '"msg":"reply chunk"' || true)
+  echo "reply chunk count: $REPLY_CHUNKS"
+else
+  echo "(none — check brain WS + EndOfTurn)"
+fi
+LINK3=pass
+echo "$REPLY_LINES" | grep -q '"msg":"reply chunk"' || LINK3=fail
+
+echo ""
+echo "=== 4. TTS (ElevenLabs conversational, not just opener) ==="
 EGRESS_LINES=$(echo "$PIPE_LOG" | grep -c '"msg":"egress audio"' || true)
 echo "egress audio log lines: $EGRESS_LINES"
-echo "$PIPE_LOG" | grep '"msg":"egress audio"' | tail -3 || true
+echo "$PIPE_LOG" | grep '"msg":"egress audio"' | tail -5 || true
+# Opener-only runs often have 1 short burst; conversational reply adds more egress after EOT.
+LINK4=pass
+if (( EGRESS_LINES < 2 )); then
+  echo "NOTE: only $EGRESS_LINES egress line(s) — may be opener-only"
+  LINK4=fail
+fi
 
-echo "--- Fallbacks ---"
-echo "$PIPE_LOG" | grep -iE 'fallback|fail-open|asr event error|tts.*failed|brain.*fail' | tail -8 || echo "(none)"
+echo ""
+echo "=== 5. Pipeline fallbacks / Sarvam WS close ==="
+echo "$PIPE_LOG" | grep -iE 'fallback|fail-open|asr event error|tts.*failed|brain.*fail|sarvam ws closed|sarvam read ended' | tail -10 || echo "(none)"
 
-echo "--- /metrics ---"
+echo ""
+echo "=== 6. /metrics ==="
 METRICS="$(curl -sf http://127.0.0.1:8080/metrics || true)"
 echo "$METRICS" | grep -E '^(media_mouth_to_ear_ms_count|media_mouth_to_ear_ms_sum|media_turns_total|media_denoise_fallbacks_total|media_amd_human_total|media_asr_reconnects_total|media_tts_fallbacks_total)' || true
 
 M2E_COUNT=$(echo "$METRICS" | awk '/^media_mouth_to_ear_ms_count /{print $2; exit}')
 M2E_SUM=$(echo "$METRICS" | awk '/^media_mouth_to_ear_ms_sum /{print $2; exit}')
+TURNS_TOTAL=$(echo "$METRICS" | awk '/^media_turns_total /{print $2; exit}')
 if [[ -n "${M2E_COUNT:-}" && "$M2E_COUNT" != "0" ]]; then
-  echo "mouth_to_ear_ms: count=$M2E_COUNT sum=$M2E_SUM avg=$((M2E_SUM / M2E_COUNT))ms"
+  M2E_AVG=$((M2E_SUM / M2E_COUNT))
+  echo "HEADLINE mouth_to_ear_ms: count=$M2E_COUNT sum=$M2E_SUM avg=${M2E_AVG}ms"
 else
-  echo "mouth_to_ear_ms: (no samples — turn may not have completed)"
+  echo "HEADLINE mouth_to_ear_ms: (no samples)"
+  M2E_AVG=""
 fi
+echo "HEADLINE media_turns_total: ${TURNS_TOTAL:-0}"
 
-# PASS/FAIL heuristics
+LINK5=pass
+[[ -n "${M2E_COUNT:-}" && "$M2E_COUNT" != "0" ]] || LINK5=fail
+LINK6=pass
+[[ -n "${TURNS_TOTAL:-}" && "$TURNS_TOTAL" != "0" ]] || LINK6=fail
+
+echo ""
+echo "=== 7. Chain summary ==="
+printf "  [1] Sarvam FINAL:     %s\n" "$LINK1"
+printf "  [2] EndOfTurn:        %s\n" "$LINK2"
+printf "  [3] Brain reply:      %s\n" "$LINK3"
+printf "  [4] TTS egress (>1):  %s\n" "$LINK4"
+printf "  [5] mouth_to_ear_ms:  %s\n" "$LINK5"
+printf "  [6] media_turns>=1:   %s\n" "$LINK6"
+
 PASS=1
-if [[ -z "$SARVAM_FINAL" ]]; then
-  echo "CHECK Sarvam final: MISSING"
-  PASS=0
-else
-  echo "CHECK Sarvam final: $SARVAM_FINAL"
-fi
-if ! echo "$PIPE_LOG" | grep -q '"msg":"reply chunk"'; then
-  echo "CHECK Brain reply: MISSING"
-  PASS=0
-else
-  echo "CHECK Brain reply: present"
-fi
-if [[ -z "${M2E_COUNT:-}" || "$M2E_COUNT" == "0" ]]; then
-  echo "CHECK mouth_to_ear_ms: MISSING"
-  PASS=0
-else
-  echo "CHECK mouth_to_ear_ms: present"
-fi
+for l in "$LINK1" "$LINK2" "$LINK3" "$LINK4" "$LINK5" "$LINK6"; do
+  [[ "$l" == pass ]] || PASS=0
+done
 
 echo ""
 if (( PASS == 1 )); then
   echo "OVERALL: PASS"
 else
-  echo "OVERALL: FAIL"
+  echo "OVERALL: FAIL — see broken link(s) above"
 fi
 
 echo ""

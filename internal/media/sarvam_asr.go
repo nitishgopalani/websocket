@@ -626,9 +626,11 @@ func parseSarvamMessages(data []byte) []ASREvent {
 		isFinal := msgType == "transcript"
 		if payload.IsFinal != nil {
 			isFinal = *payload.IsFinal
-		}
-		if payload.Final != nil {
+		} else if payload.Final != nil {
 			isFinal = *payload.Final
+		} else if msgType == "data" {
+			// Saaras v3 streaming sends utterance transcripts on type "data" without is_final.
+			isFinal = true
 		}
 		evtType := ASREventPartial
 		if isFinal {

@@ -99,6 +99,7 @@ apply_conversation_test_env() {
   export BRAIN_WS_URL="${BRAIN_WS_URL:-ws://127.0.0.1:8000/ws/brain}"
   export EGRESS_PACING=realtime
   export METRICS_ENABLED=true
+  export ASR_LANGUAGE="${ASR_LANGUAGE:-en-IN}"
 }
 
 assert_boot_flags() {
@@ -107,6 +108,7 @@ assert_boot_flags() {
   local want_amd="$3"
   local want_asr="$4"
   local want_tts="$5"
+  local want_brain="${6:-true}"
   local boot_line
   boot_line="$(grep '"msg":"audio pipeline ready"' "$log_file" | tail -1 || true)"
   if [[ -z "$boot_line" ]]; then
@@ -119,7 +121,8 @@ assert_boot_flags() {
     "denoise_enabled:$want_denoise" \
     "amd_enabled:$want_amd" \
     "asr_enabled:$want_asr" \
-    "tts_enabled:$want_tts"; do
+    "tts_enabled:$want_tts" \
+    "brain_ws_enabled:$want_brain"; do
     local key="${pair%%:*}" want="${pair##*:}"
     if ! echo "$boot_line" | grep -q "\"$key\":$want"; then
       echo "ASSERT FAIL: expected $key=$want"

@@ -265,6 +265,11 @@ func TestParseSarvamMessages(t *testing.T) {
 	if len(finals) != 1 || finals[0].Type != ASREventFinal {
 		t.Fatalf("final = %+v", finals)
 	}
+	// Saaras v3 live: type "data" without is_final is an utterance-final segment.
+	dataFinal := parseSarvamMessages([]byte(`{"type":"data","data":{"transcript":"Hi yes"}}`))
+	if len(dataFinal) != 1 || dataFinal[0].Type != ASREventFinal {
+		t.Fatalf("data without is_final = %+v", dataFinal)
+	}
 }
 
 type fakeSarvamHandler func(t *testing.T, conn *websocket.Conn, r *http.Request)

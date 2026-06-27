@@ -3,6 +3,7 @@ package media
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -207,6 +208,7 @@ func (m *TurnManager) SetListener(next TurnListener) {
 func (m *TurnManager) OnSpeechStart(ctx context.Context, session *Session) {
 	m.mu.Lock()
 	agentSpeaking := m.state.agentSpeaking
+	continuing := m.state.userSpeaking
 	m.mu.Unlock()
 	if agentSpeaking {
 		m.tryBargeInOrInterrupt(ctx, session)
@@ -215,10 +217,14 @@ func (m *TurnManager) OnSpeechStart(ctx context.Context, session *Session) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.resetUtteranceLocked()
+	if !continuing {
+		m.resetUtteranceLocked()
+	}
 	m.emitLocked(ctx, session, TurnEvent{Kind: TurnSpeechStarted, FlowClass: m.state.flowClass})
 	m.state.userSpeaking = true
-	m.state.utteranceStarted = m.clock.Now()
+	if m.state.utteranceStarted.IsZero() {
+		m.state.utteranceStarted = m.clock.Now()
+	}
 	m.armMaxUtteranceTimerLocked(ctx, session)
 }
 
@@ -262,7 +268,7 @@ func (m *TurnManager) OnFinal(ctx context.Context, session *Session, transcript 
 	defer m.mu.Unlock()
 
 	if transcript.Text != "" {
-		m.state.latestFinal = transcript.Text
+		m.state.latestFinal = mergeASRTranscript(m.state.latestFinal, transcript.Text)
 	}
 	if m.state.endSpeechSeen {
 		m.armEndpointTimerLocked(ctx, session)
@@ -352,12 +358,20 @@ func (m *TurnManager) longSilenceFallbackDurationLocked() time.Duration {
 func (m *TurnManager) onSilenceTimerExpired(ctx context.Context, session *Session) {
 	m.mu.Lock()
 	final := m.state.latestFinal
+	partial := m.state.latestPartial
 	enabled := m.semanticCfg.Enabled
 	turnEmitted := m.state.turnEmitted
 	audio, rate := m.recentAudioSnapshotLocked()
 	m.mu.Unlock()
 
-	if turnEmitted || final == "" {
+	if turnEmitted {
+		return
+	}
+	text := final
+	if text == "" {
+		text = partial
+	}
+	if text == "" {
 		return
 	}
 	if !enabled {
@@ -365,7 +379,7 @@ func (m *TurnManager) onSilenceTimerExpired(ctx context.Context, session *Sessio
 		return
 	}
 
-	pred, err := m.semanticTurn.Predict(ctx, final, audio, rate)
+	pred, err := m.semanticTurn.Predict(ctx, text, audio, rate)
 	if err != nil {
 		m.tryEmitEndOfTurn(ctx, session, false)
 		return
@@ -588,4 +602,18 @@ func (m *TurnManager) Close() error {
 		}
 	}
 	return firstErr
+}
+
+func mergeASRTranscript(prev, next string) string {
+	next = strings.TrimSpace(next)
+	if next == "" {
+		return prev
+	}
+	if prev == "" {
+		return next
+	}
+	if strings.Contains(next, prev) {
+		return next
+	}
+	return prev + " " + next
 }
