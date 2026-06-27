@@ -1,0 +1,2 @@
+# Optional Silero VAD for local VAD experiments (BARGEIN / LOCAL_VAD)
+silero-vad>=5.1

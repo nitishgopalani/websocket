@@ -1,0 +1,7 @@
+# Worker venvs and runtime artifacts
+workers/*/.venv/
+workers/.venv-silero/
+workers/semantic_turn/*.onnx
+scripts/.worker_pids
+scripts/workers.log
+scripts/pipeline_server.log

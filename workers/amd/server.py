@@ -49,11 +49,21 @@ class WhisperAMDClassifier:
     def __init__(self, threshold: float = DEFAULT_THRESHOLD) -> None:
         self.threshold = threshold
         self._model = None
+        device = os.environ.get("WHISPER_DEVICE", "cpu").strip().lower()
+        compute_type = "float16" if device == "cuda" else "int8"
         try:
             from faster_whisper import WhisperModel
 
-            self._model = WhisperModel("small", device="cpu", compute_type="int8")
-            logger.info("faster-whisper small loaded (int8)")
+            try:
+                self._model = WhisperModel("small", device=device, compute_type=compute_type)
+                logger.info("faster-whisper small loaded (device=%s, compute_type=%s)", device, compute_type)
+            except Exception as cuda_exc:  # noqa: BLE001
+                if device == "cuda":
+                    logger.warning("CUDA init failed (%s); falling back to CPU int8", cuda_exc)
+                    self._model = WhisperModel("small", device="cpu", compute_type="int8")
+                    logger.info("faster-whisper small loaded (device=cpu, compute_type=int8)")
+                else:
+                    raise
         except Exception as exc:  # noqa: BLE001
             logger.warning("Whisper unavailable; keyword-only fallback: %s", exc)
 
