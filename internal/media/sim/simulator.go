@@ -205,9 +205,13 @@ stop:
 		"stream_sid": cfg.StreamSID,
 	})
 
+	postStop := 2 * time.Second
+	if cfg.Pace == PaceRealtime {
+		postStop = 45 * time.Second
+	}
 	select {
 	case <-recvDone:
-	case <-time.After(2 * time.Second):
+	case <-time.After(postStop):
 	}
 
 	result.StoppedAt = cfg.Clock.Now()

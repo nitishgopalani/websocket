@@ -9,16 +9,25 @@ Large audio files are **not** committed; add them locally or via your artifact s
 |------|---------|
 | `../smoke.ulaw` | Synthetic 50-frame μ-law silence sequence for carrier-simulator smoke |
 
-## L-9 AMD samples (local)
+## L-9 AMD samples
 
 | File | Purpose |
 |------|---------|
 | `human_synthetic.ulaw` | espeak-ng “Hello?” — **plumbing only** (SYNTHETIC) |
 | `voicemail_synthetic.ulaw` | espeak-ng voicemail phrase — **plumbing only** (SYNTHETIC) |
-| `human_real.ulaw` | **Real L-9 sign-off** — recorded live hello pickup (8 kHz mono μ-law) |
-| `voicemail_real.ulaw` | **Real L-9 sign-off** — recorded voicemail greeting |
+| `human_real.ulaw` | **ELEVENLABS-SYNTHESIZED** — clean studio hello pickup (8 kHz mono μ-law) |
+| `voicemail_real.ulaw` | **ELEVENLABS-SYNTHESIZED** — clean studio voicemail greeting |
+| `human_long.ulaw` | **ELEVENLABS-SYNTHESIZED** — longer human utterance (>2 s, AMD/turn window) |
 
-Large audio files are **not** committed; add real recordings locally.
+Regenerate ElevenLabs fixtures (uses `ELEVENLABS_API_KEY` from `.env`, never committed):
+
+```bash
+bash scripts/gen_fixtures.sh
+```
+
+**Note:** These are clean TTS samples — they validate ASR + AMD logic end-to-end but are **not** a substitute for a real phone-line recording. Final pilot sign-off still needs one genuine recorded call.
+
+Companion `.ref.txt` files hold the exact spoken text for WER / transcript checks.
 
 ### Replay (one command)
 

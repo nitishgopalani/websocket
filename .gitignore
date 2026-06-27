@@ -16,7 +16,5 @@ scripts/live_callflow.log
 .env.live
 .env.*.local
 
-# Generated call fixtures (local)
+# Generated call fixtures (local intermediates)
 testdata/calls/human_bundled.*
-testdata/calls/human_real.*
-testdata/calls/voicemail_real.*

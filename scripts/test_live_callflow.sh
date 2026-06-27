@@ -17,6 +17,9 @@ if [[ ! -f "$ROOT/.env.live" && -f "$ROOT/.env.live.example" ]]; then
   load_env_local "$ROOT/.env.live.example"
 fi
 export WHISPER_MODEL="${WHISPER_MODEL:-tiny}"
+# WSL live callflow: denoise TCP per-frame adds backpressure; AMD classify needs headroom.
+export DENOISE_ENABLED="${LIVE_CALLFLOW_DENOISE:-false}"
+export AMD_TIMEOUT_MS="${LIVE_CALLFLOW_AMD_TIMEOUT_MS:-10000}"
 
 print_key_status
 require_keys || exit 1
@@ -33,6 +36,30 @@ echo ""
 SPOKEN="$(bash "$ROOT/scripts/ensure_spoken_fixture.sh")"
 echo "Speech fixture: $SPOKEN"
 
+# Pad short fixtures with silence so AMD window + ASR receive speech before session stop.
+pad_ulaw_min_secs() {
+  local src="$1" min_secs="$2"
+  local min_bytes=$((min_secs * 8000))
+  local sz
+  sz=$(wc -c <"$src")
+  if (( sz >= min_bytes )); then
+    echo "$src"
+    return
+  fi
+  local tmp
+  tmp=$(mktemp --suffix=.ulaw)
+  cp "$src" "$tmp"
+  local pad=$((min_bytes - sz))
+  dd if=/dev/zero bs=1 count="$pad" 2>/dev/null | tr '\000' '\377' >>"$tmp"
+  echo "$tmp"
+}
+SPOKEN_PADDED="$(pad_ulaw_min_secs "$SPOKEN" 10)"
+if [[ "$SPOKEN_PADDED" != "$SPOKEN" ]]; then
+  echo "Padded fixture for AMD/ASR window: $SPOKEN_PADDED"
+  SPOKEN="$SPOKEN_PADDED"
+  PADDED_TMP="$SPOKEN"
+fi
+
 port_open() {
   ss -ltn 2>/dev/null | grep -q ":$1 " || (echo >/dev/tcp/127.0.0.1/"$1") 2>/dev/null
 }
@@ -46,10 +73,26 @@ wait_ports() {
   return 1
 }
 
+wait_workers_ready() {
+  local deadline=$((SECONDS + 180))
+  while (( SECONDS < deadline )); do
+    if grep -q 'denoise worker listening' "$ROOT/scripts/workers.log" 2>/dev/null &&
+       grep -q 'amd worker listening' "$ROOT/scripts/workers.log" 2>/dev/null &&
+       grep -q 'semantic turn worker listening' "$ROOT/scripts/workers.log" 2>/dev/null; then
+      return 0
+    fi
+    sleep 2
+  done
+  echo "WARN: workers not all logged ready (denoise can take ~40s on first start)"
+  return 1
+}
+
 SERVER_PID=""
+PADDED_TMP=""
 cleanup() {
   [[ -n "$SERVER_PID" ]] && kill "$SERVER_PID" 2>/dev/null || true
   wait "$SERVER_PID" 2>/dev/null || true
+  [[ -n "${PADDED_TMP:-}" && -f "${PADDED_TMP:-}" ]] && rm -f "$PADDED_TMP"
 }
 trap cleanup EXIT
 
@@ -57,6 +100,7 @@ echo "--- Step 2: workers ---"
 bash "$ROOT/scripts/stop_workers.sh" 2>/dev/null || true
 bash "$ROOT/scripts/run_workers.sh"
 wait_ports || echo "WARN: worker ports not all open"
+wait_workers_ready || echo "WARN: worker log readiness timeout"
 
 echo "--- Step 3: brain (Collection) ---"
 BRAIN_URL="${BRAIN_WS_URL:-ws://127.0.0.1:8000/ws/brain}"
@@ -97,7 +141,7 @@ go run ./cmd/replay \
   -timeout 180s || true
 
 echo "Waiting for pipeline to settle..."
-sleep 15
+sleep 45
 
 echo ""
 echo "======== RESULTS ========"
