@@ -1,4 +1,4 @@
-package brain
+package brain_test
 
 import (
 	"context"
@@ -11,36 +11,29 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"websocket/internal/brain"
 	"websocket/internal/media"
 )
 
-type recordingReplyHandler struct {
-	chunks      []ChunkMessage
-	flowClass   media.FlowClass
-	done        bool
-	errFallback string
+type recordingReplyConsumer struct {
+	chunks []string
+	done   bool
 }
 
-func (r *recordingReplyHandler) OnReplyChunk(_ context.Context, _ *media.Session, turnID string, seq int, text string) {
-	r.chunks = append(r.chunks, ChunkMessage{TurnID: turnID, Seq: seq, Text: text})
+func (r *recordingReplyConsumer) OnReplyChunk(_ context.Context, _ *media.Session, _ string, _ int, text string) {
+	r.chunks = append(r.chunks, text)
 }
 
-func (r *recordingReplyHandler) OnFlowClassHint(_ context.Context, _ *media.Session, _ string, class media.FlowClass) {
-	r.flowClass = class
-}
-
-func (r *recordingReplyHandler) OnTurnDone(_ context.Context, _ *media.Session, _ DoneMessage) {
+func (r *recordingReplyConsumer) OnReplyDone(_ context.Context, _ *media.Session, _ string, _ bool, _ string) {
 	r.done = true
 }
 
-func (r *recordingReplyHandler) OnTurnError(_ context.Context, _ *media.Session, _ string, fallback string) {
-	r.errFallback = fallback
-}
+func (r *recordingReplyConsumer) OnReplyError(_ context.Context, _ *media.Session, _ string, _ string) {}
 
 func TestClientSessionStartAndTurn(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
-	var gotStart SessionStartPayload
-	var gotTurn TurnPayload
+	var gotStart brain.SessionStartPayload
+	var gotTurn brain.TurnPayload
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -60,18 +53,18 @@ func TestClientSessionStartAndTurn(t *testing.T) {
 				t.Fatalf("decode: %v", err)
 			}
 			switch header.Type {
-			case TypeSessionStart:
+			case brain.TypeSessionStart:
 				if err := json.Unmarshal(data, &gotStart); err != nil {
 					t.Fatalf("session_start: %v", err)
 				}
-			case TypeTurn:
+			case brain.TypeTurn:
 				if err := json.Unmarshal(data, &gotTurn); err != nil {
 					t.Fatalf("turn: %v", err)
 				}
-				_ = conn.WriteJSON(ChunkMessage{Type: TypeChunk, TurnID: gotTurn.TurnID, Seq: 0, Text: "Namaste."})
-				_ = conn.WriteJSON(FlowClassMessage{Type: TypeFlowClass, TurnID: gotTurn.TurnID, Next: "YesNo"})
-				_ = conn.WriteJSON(DoneMessage{Type: TypeDone, TurnID: gotTurn.TurnID, AuditID: "audit-1"})
-			case TypeSessionEnd:
+				_ = conn.WriteJSON(brain.ChunkMessage{Type: brain.TypeChunk, TurnID: gotTurn.TurnID, Seq: 0, Text: "Namaste."})
+				_ = conn.WriteJSON(brain.FlowClassMessage{Type: brain.TypeFlowClass, TurnID: gotTurn.TurnID, Next: "YesNo"})
+				_ = conn.WriteJSON(brain.DoneMessage{Type: brain.TypeDone, TurnID: gotTurn.TurnID, AuditID: "audit-1"})
+			case brain.TypeSessionEnd:
 				return
 			}
 		}
@@ -79,9 +72,9 @@ func TestClientSessionStartAndTurn(t *testing.T) {
 	defer srv.Close()
 
 	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
-	reply := &recordingReplyHandler{}
+	reply := &recordingReplyConsumer{}
 	tm := media.NewTurnManager(nil, media.DefaultEndpointConfig(), media.NewFakeClock(time.Now()), media.NoopVAD{}, nil, media.SemanticTurnConfig{}, nil, nil)
-	client := NewClient(Config{Enabled: true, URL: wsURL, BorrowerIDParam: "borrower_id", AgentIDParam: "agent_id"}, reply, tm, nil)
+	client := brain.NewClient(brain.Config{Enabled: true, URL: wsURL, BorrowerIDParam: "borrower_id", AgentIDParam: "agent_id"}, reply, tm, nil)
 
 	session := &media.Session{
 		StreamSID: "MZ-EB6",
@@ -111,13 +104,13 @@ func TestClientSessionStartAndTurn(t *testing.T) {
 	if gotTurn.Transcript != "haan" || gotTurn.FlowClass != "YesNo" {
 		t.Fatalf("turn = %+v", gotTurn)
 	}
-	if len(reply.chunks) != 1 || reply.flowClass != media.FlowYesNo {
-		t.Fatalf("reply chunks=%v flow=%v", reply.chunks, reply.flowClass)
+	if len(reply.chunks) != 1 {
+		t.Fatalf("chunks = %v", reply.chunks)
 	}
 }
 
 func TestParseFlowClassHint(t *testing.T) {
-	if ParseFlowClassHint("SpelledInput") != media.FlowSpelledInput {
+	if brain.ParseFlowClassHint("SpelledInput") != media.FlowSpelledInput {
 		t.Fatal("SpelledInput mapping")
 	}
 }

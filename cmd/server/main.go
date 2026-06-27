@@ -20,6 +20,7 @@ func main() {
 	semanticCfg := media.SemanticTurnConfigFromEnv()
 	backchannelCfg := media.BackchannelConfigFromEnv()
 	brainCfg := brain.ConfigFromEnv()
+	ttsCfg := media.TTSConfigFromEnv()
 	localVADEnabled, localVADSilero := media.LocalVADConfigFromEnv()
 
 	if addr := os.Getenv("LISTEN_ADDR"); addr != "" {
@@ -89,6 +90,12 @@ func main() {
 		}
 	}()
 
+	ttsProvider, err := media.NewTTSProvider(ttsCfg)
+	if err != nil {
+		logger.Error("tts provider init failed", "error", err)
+		os.Exit(1)
+	}
+
 	target := cfg.TargetFormat()
 	amdListener := media.NewLoggingAMDListener(logger)
 
@@ -103,12 +110,26 @@ func main() {
 			backchannel,
 			logger,
 		)
+
+		var replyConsumer media.ReplyConsumer = media.NewLoggingReplyConsumer(logger)
+		var ttsConsumer *media.TTSReplyConsumer
+
+		if ttsCfg.Enabled {
+			stream, err := ttsProvider.Open(context.Background(), media.TTSSessionMeta{})
+			if err != nil {
+				logger.Warn("tts stream open failed; using logging reply consumer", "error", err)
+			} else {
+				ttsConsumer = media.NewTTSReplyConsumer(stream, media.NewLoggingEgress(logger), turnManager, nil, logger)
+				replyConsumer = ttsConsumer
+			}
+		}
+
 		var brainClient *brain.Client
 		if brainCfg.Enabled {
-			replyHandler := &brain.LoggingReplyHandler{Logger: logger}
-			brainClient = brain.NewClient(brainCfg, replyHandler, turnManager, logger)
+			brainClient = brain.NewClient(brainCfg, replyConsumer, turnManager, logger)
 			turnManager.SetListener(brainClient)
 		}
+
 		pipeline := media.NewTranscodeSink(
 			media.NewDenoiseSink(
 				media.NewAMDGateSink(
@@ -133,8 +154,9 @@ func main() {
 			cfg.FrameDurationMs,
 			logger,
 		)
-		if brainClient != nil {
-			return &brain.BootstrapSink{Inner: pipeline, Brain: brainClient}
+
+		if brainClient != nil || ttsConsumer != nil {
+			return &brain.BootstrapSink{Inner: pipeline, Brain: brainClient, TTSReply: ttsConsumer}
 		}
 		return pipeline
 	}
@@ -149,6 +171,7 @@ func main() {
 		"semantic_turn_enabled", semanticCfg.Enabled,
 		"backchannel_enabled", backchannelCfg.Enabled,
 		"brain_ws_enabled", brainCfg.Enabled,
+		"tts_enabled", ttsCfg.Enabled,
 	)
 
 	srv := media.NewServer(cfg, logger, sinkFactory)

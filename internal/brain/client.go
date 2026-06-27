@@ -72,7 +72,7 @@ type dialFunc func(ctx context.Context, url string, header http.Header) (*websoc
 // Client is the Go-side EB-6 WebSocket client; implements media.TurnListener.
 type Client struct {
 	cfg    Config
-	reply  ReplyHandler
+	reply  media.ReplyConsumer
 	dial   dialFunc
 	logger *slog.Logger
 
@@ -87,10 +87,10 @@ type Client struct {
 }
 
 // NewClient constructs a brain WebSocket client.
-func NewClient(cfg Config, reply ReplyHandler, turnManager *media.TurnManager, logger *slog.Logger) *Client {
+func NewClient(cfg Config, reply media.ReplyConsumer, turnManager *media.TurnManager, logger *slog.Logger) *Client {
 	cfg = cfg.withDefaults()
 	if reply == nil {
-		reply = &LoggingReplyHandler{Logger: logger}
+		reply = media.NewLoggingReplyConsumer(logger)
 	}
 	if logger == nil {
 		logger = slog.Default()
@@ -248,21 +248,20 @@ func (c *Client) dispatchInbound(ctx context.Context, session *media.Session, da
 		if c.turnManager != nil {
 			c.turnManager.SetFlowClass(session, class)
 		}
-		c.reply.OnFlowClassHint(ctx, session, m.TurnID, class)
 	case DoneMessage:
 		c.mu.Lock()
 		if c.inflightTurn == m.TurnID {
 			c.inflightTurn = ""
 		}
 		c.mu.Unlock()
-		c.reply.OnTurnDone(ctx, session, m)
+		c.reply.OnReplyDone(ctx, session, m.TurnID, m.EndCall, m.Disposition)
 	case ErrorMessage:
 		c.mu.Lock()
 		if c.inflightTurn == m.TurnID {
 			c.inflightTurn = ""
 		}
 		c.mu.Unlock()
-		c.reply.OnTurnError(ctx, session, m.TurnID, m.FallbackText)
+		c.reply.OnReplyError(ctx, session, m.TurnID, m.FallbackText)
 	}
 }
 

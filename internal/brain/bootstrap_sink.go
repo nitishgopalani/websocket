@@ -8,11 +8,15 @@ import (
 
 // BootstrapSink wraps an AudioSink to connect/disconnect the EB-6 brain client per session.
 type BootstrapSink struct {
-	Inner media.AudioSink
-	Brain *Client
+	Inner    media.AudioSink
+	Brain    *Client
+	TTSReply *media.TTSReplyConsumer
 }
 
 func (s *BootstrapSink) OnStart(ctx context.Context, session *media.Session) error {
+	if s.TTSReply != nil {
+		s.TTSReply.BindSession(session)
+	}
 	if s.Brain != nil {
 		if err := s.Brain.Connect(ctx, session); err != nil {
 			return err
@@ -42,6 +46,9 @@ func (s *BootstrapSink) OnDTMF(ctx context.Context, session *media.Session, digi
 }
 
 func (s *BootstrapSink) OnStop(ctx context.Context, session *media.Session) error {
+	if s.TTSReply != nil {
+		_ = s.TTSReply.Close()
+	}
 	if s.Brain != nil {
 		_ = s.Brain.Close()
 	}

@@ -88,40 +88,46 @@ type ErrorMessage struct {
 	FallbackText string `json:"fallback_text"`
 }
 
-// ReplyHandler receives brain → Go reply events (TTS playback wired in CT-9+).
-type ReplyHandler interface {
-	OnReplyChunk(ctx context.Context, session *media.Session, turnID string, seq int, text string)
-	OnFlowClassHint(ctx context.Context, session *media.Session, turnID string, class media.FlowClass)
-	OnTurnDone(ctx context.Context, session *media.Session, msg DoneMessage)
-	OnTurnError(ctx context.Context, session *media.Session, turnID, fallback string)
-}
+// ReplyHandler is deprecated; use media.ReplyConsumer (CT-8).
+type ReplyHandler = media.ReplyConsumer
 
-// LoggingReplyHandler logs inbound brain messages.
+// LoggingReplyHandler logs inbound brain messages including flow_class hints.
 type LoggingReplyHandler struct {
+	Inner  media.ReplyConsumer
 	Logger *slog.Logger
+	Turns  *media.TurnManager
 }
 
-func (h *LoggingReplyHandler) OnReplyChunk(_ context.Context, session *media.Session, turnID string, seq int, text string) {
-	if h.Logger != nil {
+func (h *LoggingReplyHandler) OnReplyChunk(ctx context.Context, session *media.Session, turnID string, seq int, text string) {
+	if h.Inner != nil {
+		h.Inner.OnReplyChunk(ctx, session, turnID, seq, text)
+	} else if h.Logger != nil {
 		h.Logger.Info("brain chunk", "stream_sid", session.StreamSID, "turn_id", turnID, "seq", seq, "text", text)
 	}
 }
 
+func (h *LoggingReplyHandler) OnReplyDone(ctx context.Context, session *media.Session, turnID string, endCall bool, disposition string) {
+	if h.Inner != nil {
+		h.Inner.OnReplyDone(ctx, session, turnID, endCall, disposition)
+	} else if h.Logger != nil {
+		h.Logger.Info("brain done", "stream_sid", session.StreamSID, "turn_id", turnID, "end_call", endCall)
+	}
+}
+
+func (h *LoggingReplyHandler) OnReplyError(ctx context.Context, session *media.Session, turnID, fallback string) {
+	if h.Inner != nil {
+		h.Inner.OnReplyError(ctx, session, turnID, fallback)
+	} else if h.Logger != nil {
+		h.Logger.Info("brain error", "stream_sid", session.StreamSID, "turn_id", turnID, "fallback", fallback)
+	}
+}
+
 func (h *LoggingReplyHandler) OnFlowClassHint(_ context.Context, session *media.Session, turnID string, class media.FlowClass) {
+	if h.Turns != nil {
+		h.Turns.SetFlowClass(session, class)
+	}
 	if h.Logger != nil {
 		h.Logger.Info("brain flow_class", "stream_sid", session.StreamSID, "turn_id", turnID, "next", string(class))
-	}
-}
-
-func (h *LoggingReplyHandler) OnTurnDone(_ context.Context, session *media.Session, msg DoneMessage) {
-	if h.Logger != nil {
-		h.Logger.Info("brain done", "stream_sid", session.StreamSID, "turn_id", msg.TurnID, "end_call", msg.EndCall, "audit_id", msg.AuditID)
-	}
-}
-
-func (h *LoggingReplyHandler) OnTurnError(_ context.Context, session *media.Session, turnID, fallback string) {
-	if h.Logger != nil {
-		h.Logger.Info("brain error", "stream_sid", session.StreamSID, "turn_id", turnID, "fallback", fallback)
 	}
 }
 
