@@ -28,12 +28,12 @@ type Server struct {
 }
 
 // NewServer constructs a media ingress server.
-func NewServer(cfg Config, logger *slog.Logger, newSink func() AudioSink) *Server {
+func NewServer(cfg Config, logger *slog.Logger, newSink func() AudioSink, metrics *Metrics) *Server {
 	cfg = cfg.withDefaults()
 	if logger == nil {
 		logger = slog.Default()
 	}
-	manager := NewSessionManager(cfg, logger, newSink)
+	manager := NewSessionManager(cfg, logger, newSink, metrics)
 	s := &Server{
 		cfg:     cfg,
 		logger:  logger,
@@ -41,6 +41,9 @@ func NewServer(cfg Config, logger *slog.Logger, newSink func() AudioSink) *Serve
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	if metrics != nil && metrics.Enabled() {
+		mux.Handle("GET /metrics", metrics.Handler())
+	}
 	mux.HandleFunc("GET "+cfg.WSPath, s.handleWebSocket)
 
 	s.httpSrv = &http.Server{
@@ -225,7 +228,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // ListenAndServe is a convenience wrapper around Run with signal handling.
 func ListenAndServe(cfg Config, logger *slog.Logger) error {
-	srv := NewServer(cfg, logger, nil)
+	srv := NewServer(cfg, logger, nil, nil)
 	return srv.Run(context.Background())
 }
 

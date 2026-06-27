@@ -12,9 +12,14 @@ type BootstrapSink struct {
 	Brain         *Client
 	TTSReply      *media.TTSReplyConsumer
 	CarrierEgress *media.CarrierEgress
+	Observability *media.SessionObservability
 }
 
 func (s *BootstrapSink) OnStart(ctx context.Context, session *media.Session) error {
+	if s.Observability != nil && s.Observability.Timing != nil {
+		s.Observability.Timing.BindSession(session.StreamSID)
+		s.Observability.Timing.MarkSessionStart()
+	}
 	if s.CarrierEgress != nil {
 		s.CarrierEgress.BindSession(session)
 	}

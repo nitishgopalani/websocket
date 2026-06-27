@@ -74,6 +74,10 @@ type BargeInHandler struct {
 	clock  Clock
 	logger *slog.Logger
 
+	timingHub *TurnTimingHub
+	watchdog  *DeadAirWatchdog
+	metrics   *Metrics
+
 	mu                  sync.Mutex
 	pending             bool
 	agentTurnID         string
@@ -113,6 +117,16 @@ func NewBargeInHandler(
 		logger:    logger,
 		committed: make(map[string]struct{}),
 	}
+}
+
+// SetObservability attaches CT-12 timing, watchdog, and metrics hooks.
+func (h *BargeInHandler) SetObservability(timing *TurnTimingHub, watchdog *DeadAirWatchdog, metrics *Metrics) {
+	if h == nil {
+		return
+	}
+	h.timingHub = timing
+	h.watchdog = watchdog
+	h.metrics = metrics
 }
 
 // Enabled reports whether barge-in orchestration is active.
@@ -236,6 +250,9 @@ func (h *BargeInHandler) OnClassified(ctx context.Context, session *Session, age
 			h.egress.Resume()
 		}
 		h.resumedCount.Add(1)
+		if h.metrics != nil {
+			h.metrics.IncBackchannelsResumed()
+		}
 		if h.tm != nil {
 			h.tm.recordBackchannelSuppressed()
 		}
@@ -283,6 +300,15 @@ func (h *BargeInHandler) commit(ctx context.Context, session *Session, turnID st
 	}
 	if h.tm != nil {
 		h.tm.SetAgentSpeaking(session, false)
+	}
+	if h.watchdog != nil {
+		h.watchdog.CancelTurn(turnID)
+	}
+	outcome := TurnOutcome{BargeIn: true}
+	if h.timingHub != nil {
+		h.timingHub.CompleteTurn(turnID, outcome)
+	} else if h.metrics != nil {
+		h.metrics.IncBargeInsCommitted()
 	}
 	h.committedCount.Add(1)
 }

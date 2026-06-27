@@ -24,6 +24,8 @@ type TurnManager struct {
 	semanticTurn SemanticTurnDetector
 	backchannel  BackchannelClassifier
 	bargeIn      *BargeInHandler
+	timingHub    *TurnTimingHub
+	watchdog     *DeadAirWatchdog
 	logger       *slog.Logger
 
 	mu                     sync.Mutex
@@ -110,6 +112,14 @@ func (m *TurnManager) SetFlowClass(_ *Session, class FlowClass) {
 		class = FlowDefault
 	}
 	m.state.flowClass = class
+}
+
+// SetObservability attaches CT-12 timing and watchdog hooks.
+func (m *TurnManager) SetObservability(timing *TurnTimingHub, watchdog *DeadAirWatchdog) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.timingHub = timing
+	m.watchdog = watchdog
 }
 
 // SetBargeInHandler attaches the CT-11 barge-in orchestrator.
@@ -227,6 +237,13 @@ func (m *TurnManager) OnPartial(ctx context.Context, session *Session, transcrip
 
 func (m *TurnManager) OnSpeechEnd(ctx context.Context, session *Session) {
 	m.mu.Lock()
+	timingHub := m.timingHub
+	m.mu.Unlock()
+	if timingHub != nil {
+		timingHub.MarkSpeechEnd()
+	}
+
+	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	m.state.endSpeechSeen = true
@@ -234,6 +251,13 @@ func (m *TurnManager) OnSpeechEnd(ctx context.Context, session *Session) {
 }
 
 func (m *TurnManager) OnFinal(ctx context.Context, session *Session, transcript Transcript) {
+	m.mu.Lock()
+	timingHub := m.timingHub
+	m.mu.Unlock()
+	if timingHub != nil && transcript.Text != "" {
+		timingHub.MarkASRFinal()
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -407,6 +431,10 @@ func (m *TurnManager) tryEmitEndOfTurn(ctx context.Context, session *Session, fo
 	m.stopSemanticCompleteTimerLocked()
 	m.stopLongSilenceFallbackTimerLocked()
 	m.stopMaxUtteranceTimerLocked()
+
+	if m.timingHub != nil {
+		m.timingHub.BeginCallerTurn()
+	}
 
 	m.emitLocked(ctx, session, TurnEvent{
 		Kind:       TurnEndOfTurn,

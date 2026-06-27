@@ -44,6 +44,7 @@ type Session struct {
 	outboundDropped  int64
 	framesDelivered  int64
 	playbackListener PlaybackListener
+	metrics          *Metrics
 	wg               sync.WaitGroup
 	outboundOnce     sync.Once
 }
@@ -64,7 +65,10 @@ func (s *Session) OutboundDropped() int64 {
 	return atomic.LoadInt64(&s.outboundDropped)
 }
 
-// SetPlaybackListener registers the callback for inbound carrier mark echoes.
+// SetMetrics attaches CT-12 metrics for outbound drop counting.
+func (s *Session) SetMetrics(m *Metrics) {
+	s.metrics = m
+}
 func (s *Session) SetPlaybackListener(l PlaybackListener) {
 	s.playbackListener = l
 }
@@ -76,10 +80,11 @@ type SessionManager struct {
 	cfg      Config
 	logger   *slog.Logger
 	newSink  func() AudioSink
+	metrics  *Metrics
 }
 
 // NewSessionManager creates a manager with the provided sink factory.
-func NewSessionManager(cfg Config, logger *slog.Logger, newSink func() AudioSink) *SessionManager {
+func NewSessionManager(cfg Config, logger *slog.Logger, newSink func() AudioSink, metrics *Metrics) *SessionManager {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -91,6 +96,7 @@ func NewSessionManager(cfg Config, logger *slog.Logger, newSink func() AudioSink
 		cfg:      cfg.withDefaults(),
 		logger:   logger,
 		newSink:  newSink,
+		metrics:  metrics,
 	}
 }
 
@@ -107,6 +113,13 @@ func (m *SessionManager) Get(streamSID string) (*Session, bool) {
 	defer m.mu.RUnlock()
 	session, ok := m.sessions[streamSID]
 	return session, ok
+}
+
+func (m *SessionManager) updateActiveSessionsGauge() {
+	if m.metrics == nil {
+		return
+	}
+	m.metrics.SetActiveSessions(m.Count())
 }
 
 // Create opens a session from a start event. When conn is non-nil the session starts its
@@ -147,6 +160,8 @@ func (m *SessionManager) Create(ctx context.Context, start StartEvent, conn *web
 	}
 
 	m.sessions[start.StreamSID] = session
+	session.SetMetrics(m.metrics)
+	m.updateActiveSessionsGauge()
 	session.startWorker(ctx)
 	if conn != nil {
 		session.startOutboundWriter(conn)
@@ -221,6 +236,7 @@ func (m *SessionManager) Close(ctx context.Context, streamSID string) {
 	m.mu.Unlock()
 
 	session.close(ctx)
+	m.updateActiveSessionsGauge()
 	m.logger.Info("session closed",
 		"stream_sid", streamSID,
 		"active_sessions", m.Count(),
@@ -271,6 +287,9 @@ func (s *Session) EnqueueOutbound(data []byte, isAudio bool) {
 			if q.isAudio {
 				s.outboundQueue = append(s.outboundQueue[:i], s.outboundQueue[i+1:]...)
 				atomic.AddInt64(&s.outboundDropped, 1)
+				if s.metrics != nil {
+					s.metrics.IncOutboundDrop()
+				}
 				droppedAudio = true
 				break
 			}
@@ -279,6 +298,9 @@ func (s *Session) EnqueueOutbound(data []byte, isAudio bool) {
 			s.outboundQueue = append(s.outboundQueue, item)
 		} else {
 			atomic.AddInt64(&s.outboundDropped, 1)
+			if s.metrics != nil {
+				s.metrics.IncOutboundDrop()
+			}
 		}
 	} else {
 		droppedAudio := false
@@ -286,6 +308,9 @@ func (s *Session) EnqueueOutbound(data []byte, isAudio bool) {
 			if q.isAudio {
 				s.outboundQueue = append(s.outboundQueue[:i], s.outboundQueue[i+1:]...)
 				atomic.AddInt64(&s.outboundDropped, 1)
+				if s.metrics != nil {
+					s.metrics.IncOutboundDrop()
+				}
 				droppedAudio = true
 				break
 			}

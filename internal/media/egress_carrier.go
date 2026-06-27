@@ -74,6 +74,11 @@ type CarrierEgress struct {
 	stopped        bool
 	paused         bool
 	tickHandle     TimerHandle
+
+	timingHub    *TurnTimingHub
+	watchdog     *DeadAirWatchdog
+	activeTurnID string
+	egressMarked map[string]bool
 }
 
 // NewCarrierEgress constructs carrier egress with injectable clock for deterministic tests.
@@ -106,7 +111,14 @@ func NewCarrierEgress(cfg EgressConfig, frameDurationMs int, clock Clock, logger
 		frameBytes:   frameBytes,
 		frameDur:     frameDur,
 		sendAheadCap: sendAheadCap,
+		egressMarked: make(map[string]bool),
 	}
+}
+
+// SetObservability attaches CT-12 timing and watchdog hooks.
+func (e *CarrierEgress) SetObservability(timing *TurnTimingHub, watchdog *DeadAirWatchdog) {
+	e.timingHub = timing
+	e.watchdog = watchdog
 }
 
 // BindSession associates egress with a session and starts the pacing loop.
@@ -169,6 +181,7 @@ func (e *CarrierEgress) SendAudio(_ context.Context, session *Session, chunk TTS
 	frames := splitMuLawFrames(chunk.MuLaw, e.frameBytes)
 	e.mu.Lock()
 	e.pendingFrames = append(e.pendingFrames, frames...)
+	e.activeTurnID = chunk.TurnID
 	e.mu.Unlock()
 	return nil
 }
@@ -291,6 +304,7 @@ func (e *CarrierEgress) onTick() {
 			return
 		}
 		session.EnqueueOutbound(data, true)
+		e.markEgressFirstFrame(session.StreamSID)
 		if markTurn != "" {
 			markData, err := e.serializer.Mark(session.StreamSID, markTurn)
 			if err != nil {
@@ -361,7 +375,28 @@ func (e *CarrierEgress) drainBurst() {
 			continue
 		}
 		session.EnqueueOutbound(data, true)
+		e.markEgressFirstFrame(session.StreamSID)
 	}
+}
+
+func (e *CarrierEgress) markEgressFirstFrame(sessionID string) {
+	e.mu.Lock()
+	turnID := e.activeTurnID
+	if turnID == "" || e.egressMarked[turnID] {
+		e.mu.Unlock()
+		return
+	}
+	e.egressMarked[turnID] = true
+	timing := e.timingHub
+	watchdog := e.watchdog
+	e.mu.Unlock()
+	if timing != nil {
+		timing.MarkTurn(turnID, StageEgressFirstFrame)
+	}
+	if watchdog != nil {
+		watchdog.OnEgressAudio(turnID)
+	}
+	_ = sessionID
 }
 
 func (e *CarrierEgress) currentSession() *Session {

@@ -75,7 +75,7 @@ func (s *recordingSink) snapshot() (starts []*media.Session, audio [][]byte, dtm
 func dialTestServer(t *testing.T, cfg media.Config, sinkFactory func() media.AudioSink) (*websocket.Conn, *httptest.Server) {
 	t.Helper()
 
-	srv := media.NewServer(cfg, nil, sinkFactory)
+	srv := media.NewServer(cfg, nil, sinkFactory, nil)
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
 
@@ -120,7 +120,7 @@ func mustWriteJSON(t *testing.T, conn *websocket.Conn, payload map[string]any) {
 
 func TestHealthz(t *testing.T) {
 	cfg := media.DefaultConfig()
-	srv := media.NewServer(cfg, nil, func() media.AudioSink { return newRecordingSink() })
+	srv := media.NewServer(cfg, nil, func() media.AudioSink { return newRecordingSink() }, nil)
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
 
@@ -290,7 +290,7 @@ func TestMaxConcurrentSessionsEnforced(t *testing.T) {
 			idx = len(sinks) - 1
 		}
 		return sinks[idx]
-	})
+	}, nil)
 
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
@@ -374,7 +374,7 @@ func TestParseInboundEventMissingEvent(t *testing.T) {
 
 func TestSessionManagerIdempotentClose(t *testing.T) {
 	cfg := media.DefaultConfig()
-	mgr := media.NewSessionManager(cfg, nil, func() media.AudioSink { return newRecordingSink() })
+	mgr := media.NewSessionManager(cfg, nil, func() media.AudioSink { return newRecordingSink() }, nil)
 	ctx := context.Background()
 
 	_, err := mgr.Create(ctx, media.StartEvent{

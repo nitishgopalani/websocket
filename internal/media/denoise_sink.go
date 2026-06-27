@@ -88,6 +88,7 @@ func (s *DenoiseSink) OnAudio(ctx context.Context, session *Session, frame []byt
 	denoised, err := s.d.Process(ctx, near, s.sampleRate)
 	if err != nil {
 		s.fallbacks.Add(1)
+		GlobalMetrics().IncDenoiseFallback()
 		s.logger.Warn("denoise fail-open",
 			"stream_sid", session.StreamSID,
 			"error", err,

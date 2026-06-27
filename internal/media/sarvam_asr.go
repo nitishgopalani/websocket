@@ -349,6 +349,7 @@ func (s *sarvamSession) tryReconnect(ctx context.Context) {
 		}
 
 		s.reconnects.Add(1)
+		GlobalMetrics().IncASRReconnect()
 		s.logger.Info("sarvam reconnected",
 			"stream_sid", s.meta.StreamSID,
 			"reconnects", s.Reconnects(),

@@ -69,6 +69,11 @@ type TTSReplyConsumer struct {
 	pendingMark   map[string]bool
 	endCallAfter  map[string]bool
 	agentSpeaking bool
+
+	timingHub *TurnTimingHub
+	watchdog  *DeadAirWatchdog
+	turnMeta  map[string]TurnOutcome
+	ttsMarked map[string]bool
 }
 
 // NewTTSReplyConsumer constructs a reply consumer that streams text to TTS and routes audio to egress.
@@ -93,9 +98,26 @@ func NewTTSReplyConsumer(
 		logger:       logger,
 		pendingMark:  make(map[string]bool),
 		endCallAfter: make(map[string]bool),
+		turnMeta:     make(map[string]TurnOutcome),
+		ttsMarked:    make(map[string]bool),
 	}
 	go c.routeAudio()
 	return c
+}
+
+// SetObservability attaches CT-12 timing and watchdog hooks.
+func (c *TTSReplyConsumer) SetObservability(timing *TurnTimingHub, watchdog *DeadAirWatchdog) {
+	c.timingHub = timing
+	c.watchdog = watchdog
+}
+
+// SpeakHoldingLine plays a configured holding utterance (dead-air watchdog).
+func (c *TTSReplyConsumer) SpeakHoldingLine(ctx context.Context, session *Session, turnID, text string) {
+	if text == "" || session == nil {
+		return
+	}
+	c.OnReplyChunk(ctx, session, turnID, 0, text)
+	c.OnReplyDone(ctx, session, turnID, false, "watchdog_holding")
 }
 
 // BindSession associates the consumer with the active telephony session (one per sink factory).
@@ -145,14 +167,18 @@ func (c *TTSReplyConsumer) OnReplyChunk(ctx context.Context, session *Session, t
 }
 
 func (c *TTSReplyConsumer) OnReplyDone(ctx context.Context, session *Session, turnID string, endCall bool, disposition string) {
-	_ = disposition
 	c.BindSession(session)
 	c.mu.Lock()
 	c.pendingMark[turnID] = true
 	if endCall {
 		c.endCallAfter[turnID] = true
 	}
+	c.turnMeta[turnID] = TurnOutcome{Disposition: disposition, EndCall: endCall}
 	c.mu.Unlock()
+
+	if c.timingHub != nil {
+		c.timingHub.SetTurnOutcome(turnID, TurnOutcome{Disposition: disposition, EndCall: endCall})
+	}
 
 	if c.tts != nil {
 		_ = c.tts.Speak(turnID, "")
@@ -163,8 +189,14 @@ func (c *TTSReplyConsumer) OnReplyError(ctx context.Context, session *Session, t
 	if fallbackText == "" {
 		return
 	}
+	c.mu.Lock()
+	c.turnMeta[turnID] = TurnOutcome{Fallback: true, FallbackReason: "brain_error", Disposition: "error"}
+	c.mu.Unlock()
+	if c.timingHub != nil {
+		c.timingHub.SetTurnOutcome(turnID, TurnOutcome{Fallback: true, FallbackReason: "brain_error", Disposition: "error"})
+	}
 	c.OnReplyChunk(ctx, session, turnID, 0, fallbackText)
-	c.OnReplyDone(ctx, session, turnID, false, "")
+	c.OnReplyDone(ctx, session, turnID, false, "error")
 }
 
 func (c *TTSReplyConsumer) routeAudio() {
@@ -185,7 +217,14 @@ func (c *TTSReplyConsumer) routeAudio() {
 				c.turnManager.SetAgentTurn(session, chunk.TurnID, true)
 			}
 			c.agentSpeaking = true
+			markTTS := !c.ttsMarked[chunk.TurnID]
+			if markTTS {
+				c.ttsMarked[chunk.TurnID] = true
+			}
 			c.mu.Unlock()
+			if markTTS && c.timingHub != nil {
+				c.timingHub.MarkTurn(chunk.TurnID, StageTTSFirstAudio)
+			}
 			if err := c.egress.SendAudio(context.Background(), session, chunk); err != nil && c.logger != nil {
 				c.logger.Warn("egress send failed", "error", err)
 			}
@@ -218,6 +257,7 @@ func (c *TTSReplyConsumer) routeAudio() {
 			if endCall && c.onEndCall != nil {
 				c.onEndCall(context.Background(), session)
 			}
+			c.completeTurnTiming(chunk.TurnID)
 			continue
 		}
 
@@ -240,6 +280,19 @@ func (c *TTSReplyConsumer) OnPlaybackComplete(ctx context.Context, session *Sess
 	if endCall && c.onEndCall != nil {
 		c.onEndCall(ctx, session)
 	}
+	c.completeTurnTiming(turnID)
+}
+
+func (c *TTSReplyConsumer) completeTurnTiming(turnID string) {
+	if c.timingHub == nil || turnID == "" {
+		return
+	}
+	c.mu.Lock()
+	outcome := c.turnMeta[turnID]
+	delete(c.turnMeta, turnID)
+	delete(c.ttsMarked, turnID)
+	c.mu.Unlock()
+	c.timingHub.CompleteTurn(turnID, outcome)
 }
 
 // Close shuts down the TTS stream.
@@ -252,3 +305,4 @@ func (c *TTSReplyConsumer) Close() error {
 
 var _ ReplyConsumer = (*TTSReplyConsumer)(nil)
 var _ PlaybackListener = (*TTSReplyConsumer)(nil)
+var _ HoldingLineSpeaker = (*TTSReplyConsumer)(nil)

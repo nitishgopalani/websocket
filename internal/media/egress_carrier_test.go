@@ -54,7 +54,7 @@ func setupCarrierEgressTest(t *testing.T, clock Clock) (*CarrierEgress, *Session
 
 	mgr := NewSessionManager(DefaultConfig(), nil, func() AudioSink {
 		return NewLoggingSink(nil)
-	})
+	}, nil)
 	ctx := context.Background()
 	serverConn, clientConn := newWSConnPair(t)
 	session, err := mgr.Create(ctx, StartEvent{
@@ -291,7 +291,7 @@ func TestInboundMarkEchoPlaybackComplete(t *testing.T) {
 				}))
 			},
 		}
-	})
+	}, nil)
 	ctx := context.Background()
 	_, err := mgr.Create(ctx, StartEvent{
 		Event: EventStart, StreamSID: "MZ-MARK", CallSID: "CA",
@@ -356,7 +356,7 @@ func TestFullDuplexInboundWhileOutbound(t *testing.T) {
 	cfg := DefaultConfig()
 	var inboundFrames atomic.Int32
 	sink := &duplexSink{frames: &inboundFrames}
-	srv := NewServer(cfg, nil, func() AudioSink { return sink })
+	srv := NewServer(cfg, nil, func() AudioSink { return sink }, nil)
 	ts := httptest.NewServer(srv)
 	defer ts.Close()
 

@@ -84,6 +84,9 @@ type Client struct {
 	inflightTurn string
 	turnManager  *media.TurnManager
 	readCancel   context.CancelFunc
+	timingHub    *media.TurnTimingHub
+	watchdog     *media.DeadAirWatchdog
+	engineMarked map[string]bool
 }
 
 // NewClient constructs a brain WebSocket client.
@@ -96,12 +99,19 @@ func NewClient(cfg Config, reply media.ReplyConsumer, turnManager *media.TurnMan
 		logger = slog.Default()
 	}
 	return &Client{
-		cfg:         cfg,
-		reply:       reply,
-		dial:        websocket.DefaultDialer.DialContext,
-		logger:      logger,
-		turnManager: turnManager,
+		cfg:          cfg,
+		reply:        reply,
+		dial:         websocket.DefaultDialer.DialContext,
+		logger:       logger,
+		turnManager:  turnManager,
+		engineMarked: make(map[string]bool),
 	}
+}
+
+// SetObservability attaches CT-12 timing and watchdog hooks.
+func (c *Client) SetObservability(timing *media.TurnTimingHub, watchdog *media.DeadAirWatchdog) {
+	c.timingHub = timing
+	c.watchdog = watchdog
 }
 
 // Connect opens the persistent brain WebSocket for a telephony session.
@@ -155,6 +165,12 @@ func (c *Client) OnTurnEvent(ctx context.Context, session *media.Session, event 
 		c.mu.Lock()
 		c.inflightTurn = turnID
 		c.mu.Unlock()
+		if c.timingHub != nil {
+			c.timingHub.BindEngineTurn(turnID, false)
+		}
+		if c.watchdog != nil {
+			c.watchdog.ArmCallerTurn(session, turnID)
+		}
 		payload := TurnPayload{
 			Type:       TypeTurn,
 			SessionID:  session.StreamSID,
@@ -181,6 +197,12 @@ func (c *Client) SendOpenerTurn(session *media.Session) error {
 	c.mu.Lock()
 	c.inflightTurn = turnID
 	c.mu.Unlock()
+	if c.timingHub != nil {
+		c.timingHub.BindEngineTurn(turnID, true)
+	}
+	if c.watchdog != nil {
+		c.watchdog.ArmOpener(session, turnID)
+	}
 	return c.writeJSON(TurnPayload{
 		Type:       TypeTurn,
 		SessionID:  session.StreamSID,
@@ -259,6 +281,7 @@ func (c *Client) dispatchInbound(ctx context.Context, session *media.Session, da
 
 	switch m := msg.(type) {
 	case ChunkMessage:
+		c.markEngineFirstChunk(m.TurnID)
 		c.reply.OnReplyChunk(ctx, session, m.TurnID, m.Seq, m.Text)
 	case FlowClassMessage:
 		class := ParseFlowClassHint(m.Next)
@@ -280,6 +303,20 @@ func (c *Client) dispatchInbound(ctx context.Context, session *media.Session, da
 		c.mu.Unlock()
 		c.reply.OnReplyError(ctx, session, m.TurnID, m.FallbackText)
 	}
+}
+
+func (c *Client) markEngineFirstChunk(turnID string) {
+	if c.timingHub == nil || turnID == "" {
+		return
+	}
+	c.mu.Lock()
+	if c.engineMarked[turnID] {
+		c.mu.Unlock()
+		return
+	}
+	c.engineMarked[turnID] = true
+	c.mu.Unlock()
+	c.timingHub.MarkTurn(turnID, media.StageEngineFirstChunk)
 }
 
 func (c *Client) writeJSON(v any) error {

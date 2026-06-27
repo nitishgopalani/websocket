@@ -99,13 +99,18 @@ func main() {
 	}
 
 	target := cfg.TargetFormat()
-	amdListener := media.NewLoggingAMDListener(logger)
+	metricsCfg := media.MetricsConfigFromEnv()
+	metrics := media.NewMetrics(metricsCfg)
+	watchdogCfg := media.WatchdogConfigFromEnv()
+	latencyBudget := media.LatencyBudgetFromEnv()
+	amdListener := media.NewMetricsAMDListener(media.NewLoggingAMDListener(logger), metrics)
 
 	sinkFactory := func() media.AudioSink {
+		sessionClock := media.RealClock{}
 		turnManager := media.NewTurnManager(
 			turnListener,
 			endpointCfg,
-			media.RealClock{},
+			sessionClock,
 			localVAD,
 			semanticTurn,
 			semanticCfg,
@@ -116,13 +121,14 @@ func main() {
 		var replyConsumer media.ReplyConsumer = media.NewLoggingReplyConsumer(logger)
 		var ttsConsumer *media.TTSReplyConsumer
 		var carrierEgress *media.CarrierEgress
+		var obs *media.SessionObservability
 
 		if ttsCfg.Enabled {
 			stream, err := ttsProvider.Open(context.Background(), media.TTSSessionMeta{})
 			if err != nil {
 				logger.Warn("tts stream open failed; using logging reply consumer", "error", err)
 			} else {
-				carrierEgress = media.NewCarrierEgress(egressCfg, cfg.FrameDurationMs, media.RealClock{}, logger)
+				carrierEgress = media.NewCarrierEgress(egressCfg, cfg.FrameDurationMs, sessionClock, logger)
 				ttsConsumer = media.NewTTSReplyConsumer(stream, carrierEgress, turnManager, nil, logger)
 				replyConsumer = ttsConsumer
 			}
@@ -134,6 +140,25 @@ func main() {
 			turnManager.SetListener(brainClient)
 		}
 
+		if ttsConsumer != nil || brainClient != nil || carrierEgress != nil {
+			obs = &media.SessionObservability{Metrics: metrics}
+		}
+
+		if obs != nil {
+			obs.Timing = media.NewTurnTimingHub("", sessionClock, logger, metrics, latencyBudget)
+			if ttsConsumer != nil {
+				obs.Watchdog = media.NewDeadAirWatchdog(watchdogCfg, sessionClock, ttsConsumer, metrics, logger)
+				ttsConsumer.SetObservability(obs.Timing, obs.Watchdog)
+			}
+			turnManager.SetObservability(obs.Timing, obs.Watchdog)
+			if carrierEgress != nil {
+				carrierEgress.SetObservability(obs.Timing, obs.Watchdog)
+			}
+			if brainClient != nil {
+				brainClient.SetObservability(obs.Timing, obs.Watchdog)
+			}
+		}
+
 		if bargeInCfg.Enabled && carrierEgress != nil && ttsConsumer != nil {
 			bargeIn := media.NewBargeInHandler(
 				bargeInCfg,
@@ -141,9 +166,10 @@ func main() {
 				ttsConsumer,
 				brainClient,
 				turnManager,
-				media.RealClock{},
+				sessionClock,
 				logger,
 			)
+			bargeIn.SetObservability(obs.Timing, obs.Watchdog, metrics)
 			turnManager.SetBargeInHandler(bargeIn)
 		}
 
@@ -173,7 +199,10 @@ func main() {
 		)
 
 		if brainClient != nil || ttsConsumer != nil {
-			return &brain.BootstrapSink{Inner: pipeline, Brain: brainClient, TTSReply: ttsConsumer, CarrierEgress: carrierEgress}
+			return &brain.BootstrapSink{
+				Inner: pipeline, Brain: brainClient, TTSReply: ttsConsumer,
+				CarrierEgress: carrierEgress, Observability: obs,
+			}
 		}
 		return pipeline
 	}
@@ -189,9 +218,10 @@ func main() {
 		"backchannel_enabled", backchannelCfg.Enabled,
 		"brain_ws_enabled", brainCfg.Enabled,
 		"tts_enabled", ttsCfg.Enabled,
+		"metrics_enabled", metricsCfg.Enabled,
 	)
 
-	srv := media.NewServer(cfg, logger, sinkFactory)
+	srv := media.NewServer(cfg, logger, sinkFactory, metrics)
 	if err := srv.Run(context.Background()); err != nil {
 		logger.Error("server exited", "error", err)
 		os.Exit(1)

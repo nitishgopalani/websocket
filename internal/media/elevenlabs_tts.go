@@ -348,6 +348,7 @@ func (s *elevenLabsStream) tryReconnect(ctx context.Context) {
 		}
 		if err := s.connect(ctx); err == nil {
 			s.reconnects.Add(1)
+			GlobalMetrics().IncTTSReconnect()
 			s.logger.Info("elevenlabs reconnected", "stream_sid", s.meta.StreamSID, "reconnects", s.reconnects.Load())
 			return
 		}
