@@ -158,6 +158,14 @@ func (c *TTSReplyConsumer) OnReplyChunk(ctx context.Context, session *Session, t
 	if text == "" {
 		return
 	}
+	if c.logger != nil {
+		c.logger.Info("reply chunk",
+			"stream_sid", session.StreamSID,
+			"turn_id", turnID,
+			"seq", seq,
+			"text_len", len(text),
+		)
+	}
 	if c.tts == nil {
 		return
 	}

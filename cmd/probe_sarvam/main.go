@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -42,10 +43,14 @@ func run() int {
 		fmt.Println("FAIL: fixture too short")
 		return 1
 	}
-	// ~1.5s of speech at 8kHz (minimal quota).
-	maxBytes := 8000 * 2 * 3 / 2
-	if len(pcm) > maxBytes {
-		pcm = pcm[:maxBytes]
+	// Default: full fixture. Set PROBE_MAX_SEC=1.5 for minimal quota smoke.
+	if maxSec := strings.TrimSpace(os.Getenv("PROBE_MAX_SEC")); maxSec != "" {
+		if sec, err := strconv.ParseFloat(maxSec, 64); err == nil && sec > 0 {
+			maxBytes := int(8000 * 2 * sec)
+			if len(pcm) > maxBytes {
+				pcm = pcm[:maxBytes]
+			}
+		}
 	}
 
 	cfg := media.DefaultASRConfig()
@@ -118,14 +123,21 @@ func run() int {
 	<-done
 
 	fmt.Println("")
+	fmt.Println("=== SEGMENT SUMMARY ===")
+	fmt.Printf("partials=%d finals=%d (finals must be >=1 for type:data parse fix)\n", partials, finals)
+	fmt.Println("")
 	fmt.Println("=== PROBE RESULT ===")
 	fmt.Printf("fixture_bytes=%d pcm_bytes=%d partials=%d finals=%d\n", len(data), len(pcm), partials, finals)
 	if lastText != "" {
 		fmt.Printf("last_transcript=%q\n", lastText)
 	}
 	if partials+finals > 0 {
-		fmt.Println("PASS: Sarvam returned transcript(s)")
-		return 0
+		if finals >= 1 {
+			fmt.Println("PASS: Sarvam returned transcript(s) with at least one FINAL")
+			return 0
+		}
+		fmt.Println("FAIL: transcripts received but no FINAL — type:data parse may still be wrong")
+		return 1
 	}
 	fmt.Println("FAIL: no transcript (see logs above for close code / recv)")
 	return 1

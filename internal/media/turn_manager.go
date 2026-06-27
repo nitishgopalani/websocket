@@ -565,6 +565,15 @@ func (m *TurnManager) emit(ctx context.Context, session *Session, event TurnEven
 }
 
 func (m *TurnManager) emitLocked(ctx context.Context, session *Session, event TurnEvent) {
+	if m.logger != nil {
+		m.logger.Info("turn event",
+			"stream_sid", session.StreamSID,
+			"kind", event.Kind.String(),
+			"transcript", event.Transcript,
+			"flow_class", string(event.FlowClass),
+			"forced", event.Forced,
+		)
+	}
 	m.next.OnTurnEvent(ctx, session, event)
 }
 

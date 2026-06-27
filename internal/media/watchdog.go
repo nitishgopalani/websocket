@@ -178,6 +178,21 @@ func (w *DeadAirWatchdog) onTimeout(ctx context.Context, session *Session, turnI
 	}
 }
 
+// CancelAll stops all armed watchdog timers (session teardown).
+func (w *DeadAirWatchdog) CancelAll() {
+	if w == nil {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for turnID, st := range w.turns {
+		if st.timer != nil {
+			st.timer.Stop()
+		}
+		delete(w.turns, turnID)
+	}
+}
+
 // CancelTurn removes watchdog state for a turn (e.g. barge-in commit).
 func (w *DeadAirWatchdog) CancelTurn(turnID string) {
 	if w == nil || turnID == "" {

@@ -202,6 +202,15 @@ func (e *CarrierEgress) PendingDropped() int64 {
 }
 
 func (e *CarrierEgress) SendAudio(_ context.Context, session *Session, chunk TTSAudioChunk) error {
+	if e.logger != nil && len(chunk.MuLaw) > 0 {
+		e.logger.Info("egress audio",
+			"stream_sid", session.StreamSID,
+			"turn_id", chunk.TurnID,
+			"seq", chunk.Seq,
+			"bytes", len(chunk.MuLaw),
+			"final", chunk.Final,
+		)
+	}
 	if len(chunk.MuLaw) == 0 {
 		return nil
 	}

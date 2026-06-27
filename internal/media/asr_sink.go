@@ -116,8 +116,17 @@ func (s *ASRSink) consumeEvents(ctx context.Context, session *Session, asrSessio
 	for evt := range asrSession.Events() {
 		switch evt.Type {
 		case ASREventPartial:
+			s.logger.Info("asr partial",
+				"stream_sid", session.StreamSID,
+				"text", evt.Transcript.Text,
+			)
 			s.consumer.OnPartial(ctx, session, evt.Transcript)
 		case ASREventFinal:
+			s.logger.Info("asr final",
+				"stream_sid", session.StreamSID,
+				"text", evt.Transcript.Text,
+				"is_final", evt.Transcript.IsFinal,
+			)
 			s.consumer.OnFinal(ctx, session, evt.Transcript)
 		case ASREventSpeechStart:
 			s.consumer.OnSpeechStart(ctx, session)

@@ -78,6 +78,9 @@ func (s *BootstrapSink) OnDTMF(ctx context.Context, session *media.Session, digi
 }
 
 func (s *BootstrapSink) OnStop(ctx context.Context, session *media.Session) error {
+	if s.Observability != nil {
+		s.Observability.Shutdown()
+	}
 	if s.CarrierEgress != nil {
 		s.CarrierEgress.Unbind()
 	}

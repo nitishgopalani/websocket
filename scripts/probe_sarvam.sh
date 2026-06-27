@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Minimal Sarvam STT WebSocket probe (~1.5s PCM, one session). Keys never printed.
+# Minimal Sarvam STT WebSocket probe. Default: full PROBE_FIXTURE PCM (~6.6s human_long).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

@@ -161,6 +161,12 @@ func (c *Client) OnTurnEvent(ctx context.Context, session *media.Session, event 
 	}
 	switch event.Kind {
 	case media.TurnEndOfTurn:
+		c.mu.Lock()
+		open := c.sessionOpen && c.conn != nil
+		c.mu.Unlock()
+		if !open {
+			return
+		}
 		turnID := c.nextTurnID()
 		c.mu.Lock()
 		c.inflightTurn = turnID
@@ -353,15 +359,16 @@ func (c *Client) Close() error {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.sessionOpen = false
+	c.inflightTurn = ""
 	if c.conn == nil {
 		return nil
 	}
-	if c.sessionOpen && c.sessionID != "" {
+	if c.sessionID != "" {
 		_ = c.conn.WriteJSON(SessionEndPayload{Type: TypeSessionEnd, SessionID: c.sessionID})
 	}
 	err := c.conn.Close()
 	c.conn = nil
-	c.sessionOpen = false
 	return err
 }
 

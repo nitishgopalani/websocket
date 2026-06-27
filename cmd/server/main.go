@@ -158,6 +158,7 @@ func main() {
 
 		if obs != nil {
 			obs.Timing = media.NewTurnTimingHub("", sessionClock, logger, metrics, latencyBudget)
+			obs.TurnManager = turnManager
 			if ttsConsumer != nil {
 				obs.Watchdog = media.NewDeadAirWatchdog(watchdogCfg, sessionClock, ttsConsumer, metrics, logger)
 				ttsConsumer.SetObservability(obs.Timing, obs.Watchdog)

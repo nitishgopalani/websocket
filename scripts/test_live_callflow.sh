@@ -118,7 +118,13 @@ go run ./cmd/replay \
 echo "Waiting for pipeline to settle..."
 sleep 45
 
-PIPE_LOG="$(tail -n +"$BEFORE_LOG" "$ROOT/scripts/pipeline_server.log")"
+PIPE_START=$(grep -nF "$RUN_MARK" "$ROOT/scripts/pipeline_server.log" | tail -1 | cut -d: -f1)
+if [[ -n "${PIPE_START:-}" ]]; then
+  PIPE_LOG="$(sed -n "${PIPE_START},\$p" "$ROOT/scripts/pipeline_server.log")"
+else
+  PIPE_LOG="$(tail -n +"$BEFORE_LOG" "$ROOT/scripts/pipeline_server.log")"
+fi
+SESSION_CLOSED_LINE="$(echo "$PIPE_LOG" | grep '"msg":"session closed"' | tail -1 || true)"
 
 echo ""
 echo "======== FULL CHAIN RESULTS ========"
@@ -202,8 +208,21 @@ if (( EGRESS_LINES < 2 )); then
 fi
 
 echo ""
-echo "=== 5. Pipeline fallbacks / Sarvam WS close ==="
-echo "$PIPE_LOG" | grep -iE 'fallback|fail-open|asr event error|tts.*failed|brain.*fail|sarvam ws closed|sarvam read ended' | tail -10 || echo "(none)"
+echo "=== 5. Pipeline fallbacks / Sarvam WS close / lifecycle ==="
+echo "$PIPE_LOG" | grep -iE 'fallback|fail-open|asr event error|tts.*failed|brain.*fail|sarvam ws closed|sarvam read ended|brain turn send failed|brain ws read ended' | tail -12 || echo "(none)"
+if [[ -n "$SESSION_CLOSED_LINE" ]]; then
+  echo "session closed: $SESSION_CLOSED_LINE"
+  CLOSED_TS="$(echo "$SESSION_CLOSED_LINE" | sed -n 's/.*"time":"\([^"]*\)".*/\1/p')"
+  if [[ -n "$CLOSED_TS" ]]; then
+    LATE_BRAIN="$(echo "$PIPE_LOG" | grep 'brain turn send failed' || true)"
+    if [[ -n "$LATE_BRAIN" ]]; then
+      echo "WARN: brain turn send failed logged (check timing vs session close)"
+      echo "$LATE_BRAIN"
+    else
+      echo "OK: no brain turn send failed after session teardown"
+    fi
+  fi
+fi
 
 echo ""
 echo "=== 6. /metrics ==="
