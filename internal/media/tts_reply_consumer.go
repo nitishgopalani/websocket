@@ -192,14 +192,17 @@ func (c *TTSReplyConsumer) routeAudio() {
 		mark := c.pendingMark[chunk.TurnID]
 		endCall := c.endCallAfter[chunk.TurnID]
 		delete(c.pendingMark, chunk.TurnID)
-		delete(c.endCallAfter, chunk.TurnID)
 		c.mu.Unlock()
 
 		if mark {
 			if err := c.egress.Mark(context.Background(), session, chunk.TurnID); err != nil && c.logger != nil {
 				c.logger.Warn("egress mark failed", "error", err)
 			}
+			if de, ok := c.egress.(DeferredPlaybackEgress); ok && de.DefersPlaybackComplete() {
+				continue
+			}
 			c.mu.Lock()
+			delete(c.endCallAfter, chunk.TurnID)
 			c.agentSpeaking = false
 			c.mu.Unlock()
 			if c.turnManager != nil {
@@ -208,7 +211,27 @@ func (c *TTSReplyConsumer) routeAudio() {
 			if endCall && c.onEndCall != nil {
 				c.onEndCall(context.Background(), session)
 			}
+			continue
 		}
+
+		c.mu.Lock()
+		delete(c.endCallAfter, chunk.TurnID)
+		c.mu.Unlock()
+	}
+}
+
+// OnPlaybackComplete is invoked when the carrier echoes a mark after playback reaches it.
+func (c *TTSReplyConsumer) OnPlaybackComplete(ctx context.Context, session *Session, turnID string) {
+	c.mu.Lock()
+	endCall := c.endCallAfter[turnID]
+	delete(c.endCallAfter, turnID)
+	c.agentSpeaking = false
+	c.mu.Unlock()
+	if c.turnManager != nil {
+		c.turnManager.SetAgentSpeaking(session, false)
+	}
+	if endCall && c.onEndCall != nil {
+		c.onEndCall(ctx, session)
 	}
 }
 
@@ -221,3 +244,4 @@ func (c *TTSReplyConsumer) Close() error {
 }
 
 var _ ReplyConsumer = (*TTSReplyConsumer)(nil)
+var _ PlaybackListener = (*TTSReplyConsumer)(nil)

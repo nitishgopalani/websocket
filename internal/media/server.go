@@ -155,7 +155,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				s.logger.Warn("start event missing payload")
 				continue
 			}
-			session, err := s.manager.Create(ctx, *evt.Start)
+			session, err := s.manager.Create(ctx, *evt.Start, conn)
 			if err != nil {
 				if errors.Is(err, ErrMaxSessionsExceeded) {
 					s.logger.Warn("rejecting stream: max concurrent sessions exceeded",
@@ -191,6 +191,13 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			}
 			if err := s.manager.HandleDTMF(ctx, *evt.DTMF); err != nil {
 				s.logger.Warn("dtmf handling failed", "error", err)
+			}
+		case EventMark:
+			if evt.Mark == nil {
+				continue
+			}
+			if err := s.manager.HandleMark(ctx, *evt.Mark); err != nil {
+				s.logger.Warn("mark handling failed", "error", err)
 			}
 		case EventStop:
 			if evt.Stop == nil {

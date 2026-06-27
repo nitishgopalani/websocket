@@ -386,7 +386,7 @@ func TestSessionManagerIdempotentClose(t *testing.T) {
 			SampleRate: 8000,
 			Channels:   1,
 		},
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

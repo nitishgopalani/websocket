@@ -21,6 +21,7 @@ func main() {
 	backchannelCfg := media.BackchannelConfigFromEnv()
 	brainCfg := brain.ConfigFromEnv()
 	ttsCfg := media.TTSConfigFromEnv()
+	egressCfg := media.EgressConfigFromEnv()
 	localVADEnabled, localVADSilero := media.LocalVADConfigFromEnv()
 
 	if addr := os.Getenv("LISTEN_ADDR"); addr != "" {
@@ -113,13 +114,15 @@ func main() {
 
 		var replyConsumer media.ReplyConsumer = media.NewLoggingReplyConsumer(logger)
 		var ttsConsumer *media.TTSReplyConsumer
+		var carrierEgress *media.CarrierEgress
 
 		if ttsCfg.Enabled {
 			stream, err := ttsProvider.Open(context.Background(), media.TTSSessionMeta{})
 			if err != nil {
 				logger.Warn("tts stream open failed; using logging reply consumer", "error", err)
 			} else {
-				ttsConsumer = media.NewTTSReplyConsumer(stream, media.NewLoggingEgress(logger), turnManager, nil, logger)
+				carrierEgress = media.NewCarrierEgress(egressCfg, cfg.FrameDurationMs, media.RealClock{}, logger)
+				ttsConsumer = media.NewTTSReplyConsumer(stream, carrierEgress, turnManager, nil, logger)
 				replyConsumer = ttsConsumer
 			}
 		}
@@ -156,7 +159,7 @@ func main() {
 		)
 
 		if brainClient != nil || ttsConsumer != nil {
-			return &brain.BootstrapSink{Inner: pipeline, Brain: brainClient, TTSReply: ttsConsumer}
+			return &brain.BootstrapSink{Inner: pipeline, Brain: brainClient, TTSReply: ttsConsumer, CarrierEgress: carrierEgress}
 		}
 		return pipeline
 	}

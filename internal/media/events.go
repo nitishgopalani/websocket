@@ -12,6 +12,7 @@ const (
 	EventMedia     = "media"
 	EventDTMF      = "dtmf"
 	EventStop      = "stop"
+	EventMark      = "mark"
 )
 
 // AudioFormat describes inbound stream media characteristics from the start event.
@@ -64,6 +65,18 @@ type StopEvent struct {
 	StreamSID string `json:"stream_sid"`
 }
 
+// MarkChunk is a playback checkpoint echoed by the carrier when reached.
+type MarkChunk struct {
+	Name string `json:"name"`
+}
+
+// MarkEvent is the carrier echo when outbound audio playback reaches a mark.
+type MarkEvent struct {
+	Event     string    `json:"event"`
+	StreamSID string    `json:"stream_sid"`
+	Mark      MarkChunk `json:"mark"`
+}
+
 // InboundEvent is a parsed inbound websocket message.
 type InboundEvent struct {
 	Type      string
@@ -72,6 +85,7 @@ type InboundEvent struct {
 	Media     *MediaEvent
 	DTMF      *DTMFEvent
 	Stop      *StopEvent
+	Mark      *MarkEvent
 	RawType   string
 }
 
@@ -119,6 +133,12 @@ func ParseInboundEvent(data []byte, logger *slog.Logger) (InboundEvent, error) {
 			return InboundEvent{}, fmt.Errorf("decode stop event: %w", err)
 		}
 		return InboundEvent{Type: EventStop, Stop: &evt}, nil
+	case EventMark:
+		var evt MarkEvent
+		if err := json.Unmarshal(data, &evt); err != nil {
+			return InboundEvent{}, fmt.Errorf("decode mark event: %w", err)
+		}
+		return InboundEvent{Type: EventMark, Mark: &evt}, nil
 	default:
 		if logger != nil {
 			logger.Warn("ignoring unknown inbound event", "event", envelope.Event)
