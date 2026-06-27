@@ -72,6 +72,7 @@ type CarrierEgress struct {
 	playbackStart  time.Time
 	pendingDropped int64
 	stopped        bool
+	paused         bool
 	tickHandle     TimerHandle
 }
 
@@ -134,6 +135,28 @@ func (e *CarrierEgress) Unbind() {
 
 func (e *CarrierEgress) DefersPlaybackComplete() bool { return true }
 
+// Pause stops the paced drainer from dequeuing frames (buffer retained). Idempotent.
+// The session outbound writer goroutine is unchanged; only the pacer stops emitting.
+func (e *CarrierEgress) Pause() {
+	e.mu.Lock()
+	e.paused = true
+	e.mu.Unlock()
+}
+
+// Resume continues paced draining from the paused position. Idempotent.
+func (e *CarrierEgress) Resume() {
+	e.mu.Lock()
+	e.paused = false
+	e.mu.Unlock()
+}
+
+// Paused reports whether the paced drainer is paused.
+func (e *CarrierEgress) Paused() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.paused
+}
+
 // PendingDropped returns audio frames dropped locally by ClearPlayback before they were sent.
 func (e *CarrierEgress) PendingDropped() int64 {
 	return atomic.LoadInt64(&e.pendingDropped)
@@ -164,6 +187,7 @@ func (e *CarrierEgress) ClearPlayback(_ context.Context, session *Session) error
 	e.pendingMark = ""
 	e.framesSent = 0
 	e.playbackStart = e.clock.Now()
+	e.paused = false
 	e.mu.Unlock()
 	if dropped > 0 {
 		atomic.AddInt64(&e.pendingDropped, int64(dropped))
@@ -226,6 +250,13 @@ func (e *CarrierEgress) maxFramesAllowed(now time.Time) int {
 }
 
 func (e *CarrierEgress) onTick() {
+	e.mu.Lock()
+	if e.paused {
+		e.mu.Unlock()
+		return
+	}
+	e.mu.Unlock()
+
 	session := e.currentSession()
 	if session == nil {
 		return
@@ -291,6 +322,13 @@ func (e *CarrierEgress) onTick() {
 }
 
 func (e *CarrierEgress) drainBurst() {
+	e.mu.Lock()
+	if e.paused {
+		e.mu.Unlock()
+		return
+	}
+	e.mu.Unlock()
+
 	session := e.currentSession()
 	if session == nil {
 		return

@@ -23,6 +23,7 @@ type TurnManager struct {
 	localVAD     LocalVAD
 	semanticTurn SemanticTurnDetector
 	backchannel  BackchannelClassifier
+	bargeIn      *BargeInHandler
 	logger       *slog.Logger
 
 	mu                     sync.Mutex
@@ -33,7 +34,9 @@ type TurnManager struct {
 type turnState struct {
 	flowClass                FlowClass
 	agentSpeaking            bool
+	agentTurnID              string
 	userSpeaking             bool
+	localVADActive           bool
 	latestPartial            string
 	latestFinal              string
 	endSpeechSeen            bool
@@ -109,24 +112,74 @@ func (m *TurnManager) SetFlowClass(_ *Session, class FlowClass) {
 	m.state.flowClass = class
 }
 
+// SetBargeInHandler attaches the CT-11 barge-in orchestrator.
+func (m *TurnManager) SetBargeInHandler(h *BargeInHandler) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.bargeIn = h
+}
+
 // SetAgentSpeaking tracks whether the agent is currently playing TTS (for interrupt detection).
 func (m *TurnManager) SetAgentSpeaking(_ *Session, speaking bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.state.agentSpeaking = speaking
+	if !speaking {
+		m.state.agentTurnID = ""
+	}
 }
 
-// ObserveAudio optionally checks local VAD for fast interrupt while the agent is speaking.
+// SetAgentTurn tracks agent playback and the in-flight reply turn ID (for barge-in cancel).
+func (m *TurnManager) SetAgentTurn(_ *Session, turnID string, speaking bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.state.agentSpeaking = speaking
+	if speaking {
+		m.state.agentTurnID = turnID
+	} else {
+		m.state.agentTurnID = ""
+	}
+}
+
+func (m *TurnManager) isAgentSpeaking() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.state.agentSpeaking
+}
+
+func (m *TurnManager) agentTurnID() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.state.agentTurnID
+}
+
+func (m *TurnManager) recordBackchannelSuppressed() {
+	m.backchannelsSuppressed.Add(1)
+}
+
+// ObserveAudio optionally checks local VAD for fast barge-in pause while the agent is speaking.
 func (m *TurnManager) ObserveAudio(ctx context.Context, session *Session, pcm16 []byte, rate int) {
 	m.appendRecentAudioLocked(pcm16, rate)
 
+	speech := m.localVAD.IsSpeech(pcm16, rate)
 	m.mu.Lock()
 	agentSpeaking := m.state.agentSpeaking
+	wasActive := m.state.localVADActive
+	m.state.localVADActive = speech
+	bargeIn := m.bargeIn
+	agentTurnID := m.state.agentTurnID
 	m.mu.Unlock()
+
 	if !agentSpeaking {
 		return
 	}
-	if m.localVAD.IsSpeech(pcm16, rate) {
+	if bargeIn != nil && bargeIn.Enabled() {
+		if speech && !wasActive {
+			bargeIn.OnSpeechOnset(ctx, session, agentTurnID)
+		}
+		return
+	}
+	if speech {
 		m.tryEmitInterrupt(ctx, session)
 	}
 }
@@ -143,11 +196,14 @@ func (m *TurnManager) SetListener(next TurnListener) {
 
 func (m *TurnManager) OnSpeechStart(ctx context.Context, session *Session) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.state.agentSpeaking {
-		m.tryEmitInterruptLocked(ctx, session)
+	agentSpeaking := m.state.agentSpeaking
+	m.mu.Unlock()
+	if agentSpeaking {
+		m.tryBargeInOrInterrupt(ctx, session)
 	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
 	m.resetUtteranceLocked()
 	m.emitLocked(ctx, session, TurnEvent{Kind: TurnSpeechStarted, FlowClass: m.state.flowClass})
@@ -361,30 +417,54 @@ func (m *TurnManager) tryEmitEndOfTurn(ctx context.Context, session *Session, fo
 }
 
 func (m *TurnManager) tryEmitInterrupt(ctx context.Context, session *Session) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.tryEmitInterruptLocked(ctx, session)
+	m.tryBargeInOrInterrupt(ctx, session)
 }
 
-func (m *TurnManager) tryEmitInterruptLocked(ctx context.Context, session *Session) {
+func (m *TurnManager) tryBargeInOrInterrupt(ctx context.Context, session *Session) {
+	m.mu.Lock()
 	if !m.state.agentSpeaking {
+		m.mu.Unlock()
 		return
 	}
 	transcript := m.state.latestFinal
 	if transcript == "" {
 		transcript = m.state.latestPartial
 	}
+	agentTurnID := m.state.agentTurnID
+	bargeIn := m.bargeIn
+	flowClass := m.state.flowClass
 	audio, rate := m.recentAudioSnapshotLocked()
+	backchannel := m.backchannel
+	m.mu.Unlock()
 
-	if !IsNoopBackchannel(m.backchannel) {
-		ok, err := m.backchannel.IsBackchannel(ctx, transcript, audio, rate)
+	if bargeIn != nil && bargeIn.Enabled() {
+		if !bargeIn.IsPending() {
+			bargeIn.OnSpeechOnset(ctx, session, agentTurnID)
+		}
+		if !IsNoopBackchannel(backchannel) {
+			ok, err := backchannel.IsBackchannel(ctx, transcript, audio, rate)
+			if err != nil {
+				bargeIn.OnClassified(ctx, session, agentTurnID, false)
+				return
+			}
+			bargeIn.OnClassified(ctx, session, agentTurnID, ok)
+			return
+		}
+		bargeIn.OnClassified(ctx, session, agentTurnID, false)
+		return
+	}
+
+	if !IsNoopBackchannel(backchannel) {
+		ok, err := backchannel.IsBackchannel(ctx, transcript, audio, rate)
 		if err == nil && ok {
 			m.backchannelsSuppressed.Add(1)
 			return
 		}
 	}
 
-	m.emitLocked(ctx, session, TurnEvent{Kind: TurnInterrupt, FlowClass: m.state.flowClass})
+	m.mu.Lock()
+	m.emitLocked(ctx, session, TurnEvent{Kind: TurnInterrupt, FlowClass: flowClass})
+	m.mu.Unlock()
 }
 
 func (m *TurnManager) appendRecentAudioLocked(pcm16 []byte, rate int) {

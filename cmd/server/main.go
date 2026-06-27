@@ -22,6 +22,7 @@ func main() {
 	brainCfg := brain.ConfigFromEnv()
 	ttsCfg := media.TTSConfigFromEnv()
 	egressCfg := media.EgressConfigFromEnv()
+	bargeInCfg := media.BargeInConfigFromEnv()
 	localVADEnabled, localVADSilero := media.LocalVADConfigFromEnv()
 
 	if addr := os.Getenv("LISTEN_ADDR"); addr != "" {
@@ -131,6 +132,19 @@ func main() {
 		if brainCfg.Enabled {
 			brainClient = brain.NewClient(brainCfg, replyConsumer, turnManager, logger)
 			turnManager.SetListener(brainClient)
+		}
+
+		if bargeInCfg.Enabled && carrierEgress != nil && ttsConsumer != nil {
+			bargeIn := media.NewBargeInHandler(
+				bargeInCfg,
+				carrierEgress,
+				ttsConsumer,
+				brainClient,
+				turnManager,
+				media.RealClock{},
+				logger,
+			)
+			turnManager.SetBargeInHandler(bargeIn)
 		}
 
 		pipeline := media.NewTranscodeSink(

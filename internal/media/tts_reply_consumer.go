@@ -105,16 +105,23 @@ func (c *TTSReplyConsumer) BindSession(session *Session) {
 	c.mu.Unlock()
 }
 
-// CancelPlayback stops TTS and clears egress for barge-in (CT-11 seam).
-func (c *TTSReplyConsumer) CancelPlayback(ctx context.Context, turnID string) {
+// CancelTTS stops TTS synthesis for a turn without clearing egress (CT-11 commit path).
+func (c *TTSReplyConsumer) CancelTTS(turnID string) {
 	if c.tts != nil {
 		_ = c.tts.Cancel(turnID)
 	}
 	c.mu.Lock()
-	session := c.session
 	delete(c.pendingMark, turnID)
 	delete(c.endCallAfter, turnID)
 	c.agentSpeaking = false
+	c.mu.Unlock()
+}
+
+// CancelPlayback stops TTS and clears egress for barge-in (CT-11 seam).
+func (c *TTSReplyConsumer) CancelPlayback(ctx context.Context, turnID string) {
+	c.CancelTTS(turnID)
+	c.mu.Lock()
+	session := c.session
 	c.mu.Unlock()
 	if session != nil && c.turnManager != nil {
 		c.turnManager.SetAgentSpeaking(session, false)
@@ -175,7 +182,7 @@ func (c *TTSReplyConsumer) routeAudio() {
 		if len(chunk.MuLaw) > 0 {
 			c.mu.Lock()
 			if !c.agentSpeaking && c.turnManager != nil {
-				c.turnManager.SetAgentSpeaking(session, true)
+				c.turnManager.SetAgentTurn(session, chunk.TurnID, true)
 			}
 			c.agentSpeaking = true
 			c.mu.Unlock()

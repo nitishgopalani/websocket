@@ -197,13 +197,30 @@ func (c *Client) sendCancel(session *media.Session) {
 	if turnID == "" {
 		return
 	}
+	_ = c.Cancel(turnID)
+}
+
+// Cancel sends a brain cancel for an in-flight turn (CT-8 / CT-11 barge-in commit).
+func (c *Client) Cancel(turnID string) error {
+	if !c.cfg.Enabled || turnID == "" {
+		return nil
+	}
+	c.mu.Lock()
+	inflight := c.inflightTurn
+	sessionID := c.sessionID
+	c.mu.Unlock()
+	if inflight != turnID {
+		return nil
+	}
 	if err := c.writeJSON(CancelPayload{
 		Type:      TypeCancel,
-		SessionID: session.StreamSID,
+		SessionID: sessionID,
 		TurnID:    turnID,
 	}); err != nil {
-		c.logger.Warn("brain cancel send failed", "error", err, "stream_sid", session.StreamSID)
+		c.logger.Warn("brain cancel send failed", "error", err, "stream_sid", sessionID, "turn_id", turnID)
+		return err
 	}
+	return nil
 }
 
 func (c *Client) readLoop(ctx context.Context, session *media.Session) {
