@@ -5,3 +5,18 @@ workers/semantic_turn/*.onnx
 scripts/.worker_pids
 scripts/workers.log
 scripts/pipeline_server.log
+scripts/bench_amd_results.log
+scripts/local_setup_run.log
+scripts/preflight_live.log
+scripts/live_callflow.log
+
+# Secrets — never commit
+.env
+.env.local
+.env.live
+.env.*.local
+
+# Generated call fixtures (local)
+testdata/calls/human_bundled.*
+testdata/calls/human_real.*
+testdata/calls/voicemail_real.*
