@@ -68,6 +68,7 @@ type AMDGateSink struct {
 	maxBufferBytes      int
 	decided             bool
 	decideOnce          sync.Once
+	downstreamStarted   bool
 	timer               *time.Timer
 	session             *Session
 	droppedMachine      atomic.Int64
@@ -115,12 +116,20 @@ func (g *AMDGateSink) OnStart(ctx context.Context, session *Session) error {
 	g.session = session
 	if IsNoopAMD(g.clf) {
 		g.state = amdStateHuman
-		return g.next.OnStart(ctx, session)
+		return g.startDownstream(ctx, session)
 	}
 	g.state = amdStateDetecting
 	g.timer = time.AfterFunc(time.Duration(g.windowMs)*time.Millisecond, func() {
 		_ = g.decide(context.Background(), "window_timer")
 	})
+	return nil
+}
+
+func (g *AMDGateSink) startDownstream(ctx context.Context, session *Session) error {
+	if g.downstreamStarted {
+		return nil
+	}
+	g.downstreamStarted = true
 	return g.next.OnStart(ctx, session)
 }
 
@@ -225,6 +234,9 @@ func (g *AMDGateSink) applyDecision(ctx context.Context, session *Session, decis
 		return nil
 	default:
 		g.state = amdStateHuman
+		if err := g.startDownstream(ctx, session); err != nil {
+			return err
+		}
 		if err := g.flushBuffer(ctx, session); err != nil {
 			return err
 		}

@@ -13,6 +13,8 @@ type BootstrapSink struct {
 	TTSReply      *media.TTSReplyConsumer
 	CarrierEgress *media.CarrierEgress
 	Observability *media.SessionObservability
+	AMDEnabled    bool
+	CallControl   *CallControl
 }
 
 func (s *BootstrapSink) OnStart(ctx context.Context, session *media.Session) error {
@@ -21,26 +23,44 @@ func (s *BootstrapSink) OnStart(ctx context.Context, session *media.Session) err
 		s.Observability.Timing.MarkSessionStart()
 	}
 	if s.CarrierEgress != nil {
+		if s.AMDEnabled {
+			s.CarrierEgress.EnableHumanGate()
+		}
 		s.CarrierEgress.BindSession(session)
 	}
 	if s.TTSReply != nil {
 		s.TTSReply.BindSession(session)
-		session.SetPlaybackListener(s.TTSReply)
+		session.SetPlaybackListener(s.playbackListener())
+	} else if s.CallControl != nil {
+		session.SetPlaybackListener(s.CallControl)
 	} else {
 		session.SetPlaybackListener(media.NewLoggingPlaybackListener(nil))
 	}
-	if s.Brain != nil {
+	if s.Brain != nil && !s.AMDEnabled {
 		if err := s.Brain.Connect(ctx, session); err != nil {
 			return err
 		}
+		if s.CallControl != nil {
+			s.CallControl.markBrainConnected()
+		}
 		if err := s.Brain.SendOpenerTurn(session); err != nil {
 			return err
+		}
+		if s.CallControl != nil {
+			s.CallControl.recordOpener()
 		}
 	}
 	if s.Inner == nil {
 		return nil
 	}
 	return s.Inner.OnStart(ctx, session)
+}
+
+func (s *BootstrapSink) playbackListener() media.PlaybackListener {
+	if s.CallControl != nil {
+		return s.CallControl
+	}
+	return s.TTSReply
 }
 
 func (s *BootstrapSink) OnAudio(ctx context.Context, session *media.Session, frame []byte) error {

@@ -79,13 +79,17 @@ type CarrierEgress struct {
 	watchdog     *DeadAirWatchdog
 	activeTurnID string
 	egressMarked map[string]bool
+	humanGated   bool
 }
 
 // NewCarrierEgress constructs carrier egress with injectable clock for deterministic tests.
-func NewCarrierEgress(cfg EgressConfig, frameDurationMs int, clock Clock, logger *slog.Logger) *CarrierEgress {
+func NewCarrierEgress(cfg EgressConfig, frameDurationMs int, clock Clock, serializer CarrierSerializer, logger *slog.Logger) *CarrierEgress {
 	cfg = cfg.withDefaults()
 	if clock == nil {
 		clock = RealClock{}
+	}
+	if serializer == nil {
+		serializer = NewCarrierSerializer(DefaultCarrierConfig())
 	}
 	if logger == nil {
 		logger = slog.Default()
@@ -105,7 +109,7 @@ func NewCarrierEgress(cfg EgressConfig, frameDurationMs int, clock Clock, logger
 	}
 	return &CarrierEgress{
 		cfg:          cfg,
-		serializer:   ExotelFonadaSerializer{},
+		serializer:   serializer,
 		clock:        clock,
 		logger:       logger,
 		frameBytes:   frameBytes,
@@ -113,6 +117,29 @@ func NewCarrierEgress(cfg EgressConfig, frameDurationMs int, clock Clock, logger
 		sendAheadCap: sendAheadCap,
 		egressMarked: make(map[string]bool),
 	}
+}
+
+// EnableHumanGate blocks outbound audio until ConfirmHuman (CT-14 AMD pilot).
+func (e *CarrierEgress) EnableHumanGate() {
+	e.mu.Lock()
+	e.humanGated = true
+	e.paused = true
+	e.mu.Unlock()
+}
+
+// ConfirmHuman releases the human gate and resumes paced egress.
+func (e *CarrierEgress) ConfirmHuman() {
+	e.mu.Lock()
+	e.humanGated = false
+	e.mu.Unlock()
+	e.Resume()
+}
+
+// HumanGated reports whether egress is waiting for AMD human confirmation.
+func (e *CarrierEgress) HumanGated() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.humanGated
 }
 
 // SetObservability attaches CT-12 timing and watchdog hooks.

@@ -81,7 +81,7 @@ func NewSmokeHarness(cfg SmokeHarnessConfig) (*SmokeHarness, error) {
 		)
 
 		ttsStream, _ := ttsProvider.Open(context.Background(), media.TTSSessionMeta{})
-		carrierEgress := media.NewCarrierEgress(egressCfg, 20, sessionClock, nil)
+		carrierEgress := media.NewCarrierEgress(egressCfg, 20, sessionClock, nil, nil)
 		ttsConsumer := media.NewTTSReplyConsumer(ttsStream, carrierEgress, turnManager, nil, nil)
 
 		brainCfg := brain.Config{Enabled: true, URL: brainURL}
@@ -206,7 +206,7 @@ func BuildSmokePipelineSink(
 	egressCfg.Pacing = "burst"
 
 	ttsStream, _ := tts.Open(context.Background(), media.TTSSessionMeta{})
-	carrierEgress := media.NewCarrierEgress(egressCfg, 20, clock, nil)
+	carrierEgress := media.NewCarrierEgress(egressCfg, 20, clock, nil, nil)
 	ttsConsumer := media.NewTTSReplyConsumer(ttsStream, carrierEgress, turnManager, nil, nil)
 
 	brainCfg := brain.Config{Enabled: true, URL: brainURL}

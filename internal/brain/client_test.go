@@ -28,7 +28,8 @@ func (r *recordingReplyConsumer) OnReplyDone(_ context.Context, _ *media.Session
 	r.done = true
 }
 
-func (r *recordingReplyConsumer) OnReplyError(_ context.Context, _ *media.Session, _ string, _ string) {}
+func (r *recordingReplyConsumer) OnReplyError(_ context.Context, _ *media.Session, _ string, _ string) {
+}
 
 func TestClientSessionStartAndTurn(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}

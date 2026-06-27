@@ -24,6 +24,10 @@ func main() {
 	egressCfg := media.EgressConfigFromEnv()
 	bargeInCfg := media.BargeInConfigFromEnv()
 	localVADEnabled, localVADSilero := media.LocalVADConfigFromEnv()
+	carrierCfg := media.CarrierConfigFromEnv()
+	voicemailCfg := media.VoicemailConfigFromEnv()
+	carrierSerializer := media.NewCarrierSerializer(carrierCfg)
+	sessionCloser := &media.SessionCloserHolder{}
 
 	if addr := os.Getenv("LISTEN_ADDR"); addr != "" {
 		cfg.ListenAddr = addr
@@ -103,10 +107,15 @@ func main() {
 	metrics := media.NewMetrics(metricsCfg)
 	watchdogCfg := media.WatchdogConfigFromEnv()
 	latencyBudget := media.LatencyBudgetFromEnv()
-	amdListener := media.NewMetricsAMDListener(media.NewLoggingAMDListener(logger), metrics)
 
 	sinkFactory := func() media.AudioSink {
 		sessionClock := media.RealClock{}
+		callControl := brain.NewCallControl(brain.CallControlConfig{
+			AMDEnabled: amdCfg.Enabled,
+			Voicemail:  voicemailCfg,
+			Logger:     logger,
+		})
+
 		turnManager := media.NewTurnManager(
 			turnListener,
 			endpointCfg,
@@ -122,23 +131,26 @@ func main() {
 		var ttsConsumer *media.TTSReplyConsumer
 		var carrierEgress *media.CarrierEgress
 		var obs *media.SessionObservability
+		var brainClient *brain.Client
 
 		if ttsCfg.Enabled {
 			stream, err := ttsProvider.Open(context.Background(), media.TTSSessionMeta{})
 			if err != nil {
 				logger.Warn("tts stream open failed; using logging reply consumer", "error", err)
 			} else {
-				carrierEgress = media.NewCarrierEgress(egressCfg, cfg.FrameDurationMs, sessionClock, logger)
+				carrierEgress = media.NewCarrierEgress(egressCfg, cfg.FrameDurationMs, sessionClock, carrierSerializer, logger)
 				ttsConsumer = media.NewTTSReplyConsumer(stream, carrierEgress, turnManager, nil, logger)
 				replyConsumer = ttsConsumer
 			}
 		}
 
-		var brainClient *brain.Client
 		if brainCfg.Enabled {
 			brainClient = brain.NewClient(brainCfg, replyConsumer, turnManager, logger)
 			turnManager.SetListener(brainClient)
 		}
+
+		callControl.Bind(brainClient, ttsConsumer, carrierEgress, sessionCloser)
+		amdListener := media.NewMetricsAMDListener(callControl, metrics)
 
 		if ttsConsumer != nil || brainClient != nil || carrierEgress != nil {
 			obs = &media.SessionObservability{Metrics: metrics}
@@ -202,6 +214,7 @@ func main() {
 			return &brain.BootstrapSink{
 				Inner: pipeline, Brain: brainClient, TTSReply: ttsConsumer,
 				CarrierEgress: carrierEgress, Observability: obs,
+				AMDEnabled: amdCfg.Enabled, CallControl: callControl,
 			}
 		}
 		return pipeline
@@ -210,8 +223,10 @@ func main() {
 	logger.Info("audio pipeline ready",
 		"target_sample_rate", target.SampleRate,
 		"frame_duration_ms", cfg.FrameDurationMs,
+		"carrier", carrierCfg.Variant,
 		"denoise_enabled", denoiseCfg.Enabled,
 		"amd_enabled", amdCfg.Enabled,
+		"voicemail_action", voicemailCfg.Action,
 		"asr_enabled", asrCfg.Enabled,
 		"local_vad_enabled", localVADEnabled,
 		"semantic_turn_enabled", semanticCfg.Enabled,
@@ -222,6 +237,7 @@ func main() {
 	)
 
 	srv := media.NewServer(cfg, logger, sinkFactory, metrics)
+	sessionCloser.SetManager(srv.Manager())
 	if err := srv.Run(context.Background()); err != nil {
 		logger.Error("server exited", "error", err)
 		os.Exit(1)

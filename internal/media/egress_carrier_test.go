@@ -50,7 +50,7 @@ func setupCarrierEgressTest(t *testing.T, clock Clock) (*CarrierEgress, *Session
 	cap := &outboundCapture{clock: clock}
 	cfg := DefaultEgressConfig()
 	cfg.JitterMs = 300
-	egress := NewCarrierEgress(cfg, 20, clock, nil)
+	egress := NewCarrierEgress(cfg, 20, clock, nil, nil)
 
 	mgr := NewSessionManager(DefaultConfig(), nil, func() AudioSink {
 		return NewLoggingSink(nil)
@@ -155,6 +155,24 @@ func waitCapture(t *testing.T, cap *outboundCapture, min int, timeout time.Durat
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatalf("capture has %d messages, want >= %d", len(cap.snapshot()), min)
+}
+
+func TestCarrierEgressHumanGate(t *testing.T) {
+	clock := NewFakeClock(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+	egress, session, cap := setupCarrierEgressTest(t, clock)
+	egress.EnableHumanGate()
+
+	audio := make([]byte, 160)
+	if err := egress.SendAudio(context.Background(), session, TTSAudioChunk{TurnID: "t1", MuLaw: audio}); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(40 * time.Millisecond)
+	if len(cap.snapshot()) != 0 {
+		t.Fatal("expected no outbound while human gated")
+	}
+	egress.ConfirmHuman()
+	clock.Advance(20 * time.Millisecond)
+	waitCapture(t, cap, 1, time.Second)
 }
 
 func TestCarrierEgressSendAudioMediaFraming(t *testing.T) {
@@ -376,7 +394,7 @@ func TestFullDuplexInboundWhileOutbound(t *testing.T) {
 	waitForSession(t, srv, "MZ-DX")
 
 	clock := NewFakeClock(time.Now())
-	egress := NewCarrierEgress(DefaultEgressConfig(), 20, clock, nil)
+	egress := NewCarrierEgress(DefaultEgressConfig(), 20, clock, nil, nil)
 	session, ok := srv.Manager().Get("MZ-DX")
 	if !ok {
 		t.Fatal("session not found")
