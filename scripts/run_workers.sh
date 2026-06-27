@@ -1,13 +1,29 @@
 #!/usr/bin/env bash
-# Start denoise, AMD, and semantic-turn workers in the background.
+# Start pipeline workers; wait until required ports are listening before returning.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PID_FILE="$ROOT/scripts/.worker_pids"
 LOG_FILE="$ROOT/scripts/workers.log"
 
+# shellcheck disable=SC1091
+source "$ROOT/scripts/load_env.sh"
+load_env_stack "$ROOT"
+
 mkdir -p "$ROOT/scripts"
 : > "$LOG_FILE"
+
+env_true() {
+  case "${1:-}" in
+    1 | true | TRUE | yes | YES) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+port_open() {
+  local port="$1"
+  ss -ltn 2>/dev/null | grep -q ":${port} " || (echo >/dev/tcp/127.0.0.1/"$port") 2>/dev/null
+}
 
 start_worker() {
   local name="$1"
@@ -28,27 +44,64 @@ start_worker() {
   echo "  pid=$pid"
 }
 
+wait_workers_ready() {
+  local need_denoise=0 need_amd=0 need_semantic=0
+  env_true "${DENOISE_ENABLED:-false}" && need_denoise=1
+  env_true "${AMD_ENABLED:-false}" && need_amd=1
+  env_true "${SEMANTIC_TURN_ENABLED:-true}" && need_semantic=1
+
+  local deadline=$((SECONDS + 180))
+  echo "Waiting for workers (denoise=$need_denoise amd=$need_amd semantic=$need_semantic)..."
+  while (( SECONDS < deadline )); do
+    local ports_ok=1 logs_ok=1
+
+    if (( need_denoise == 1 )); then
+      port_open 9091 || ports_ok=0
+      grep -q 'denoise worker listening' "$LOG_FILE" 2>/dev/null || logs_ok=0
+    fi
+    if (( need_amd == 1 )); then
+      port_open 9092 || ports_ok=0
+      grep -q 'amd worker listening' "$LOG_FILE" 2>/dev/null || logs_ok=0
+      grep -q "faster-whisper ${WHISPER_MODEL:-base} loaded" "$LOG_FILE" 2>/dev/null || logs_ok=0
+    fi
+    if (( need_semantic == 1 )); then
+      port_open 9093 || ports_ok=0
+      grep -q 'semantic turn worker listening' "$LOG_FILE" 2>/dev/null || logs_ok=0
+    fi
+
+    if (( ports_ok == 1 && logs_ok == 1 )); then
+      echo "Workers ready."
+      return 0
+    fi
+    sleep 2
+  done
+  echo "FAIL: workers not ready within 180s"
+  tail -30 "$LOG_FILE" || true
+  return 1
+}
+
 if [[ -f "$PID_FILE" ]]; then
   echo "WARN: $PID_FILE exists — run scripts/stop_workers.sh first or workers may duplicate"
 fi
 
 : > "$PID_FILE"
 
-start_worker denoise "127.0.0.1:9091"
+if env_true "${DENOISE_ENABLED:-false}"; then
+  start_worker denoise "127.0.0.1:9091"
+else
+  echo "[$(date -Iseconds)] skipping denoise worker (DENOISE_ENABLED=false)" | tee -a "$LOG_FILE"
+fi
 
-# AMD: default CPU int8 — reliable in WSL2. CUDA 13.0 + CTranslate2 needs libcublas.so.12 (cuBLAS 12).
-# GPU path (optional, when cuBLAS 12 is available):
-#   pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
-#   export LD_LIBRARY_PATH="$(
-#     python3 -c \"import os,nvidia.cublas.lib,nvidia.cudnn.lib as c; print(':'.join([os.path.dirname(nvidia.cublas.lib.__file__), os.path.dirname(c.lib.__file__)]))\"
-#   ):\$LD_LIBRARY_PATH"
-#   start_worker amd "127.0.0.1:9092" "WHISPER_DEVICE=cuda WHISPER_MODEL=base"
-# Production default: tiny (~745ms p50 on WSL CPU). Override with WHISPER_MODEL=base|small if needed.
-start_worker amd "127.0.0.1:9092" "WHISPER_DEVICE=cpu WHISPER_MODEL=${WHISPER_MODEL:-base}"
+if env_true "${AMD_ENABLED:-false}"; then
+  start_worker amd "127.0.0.1:9092" "WHISPER_DEVICE=cpu WHISPER_MODEL=${WHISPER_MODEL:-base}"
+else
+  echo "[$(date -Iseconds)] skipping amd worker (AMD_ENABLED=false)" | tee -a "$LOG_FILE"
+fi
 
 start_worker semantic_turn "127.0.0.1:9093"
 
-sleep 2
+wait_workers_ready
+
 echo ""
 echo "Workers started. PIDs in $PID_FILE"
 echo "Combined log: $LOG_FILE"

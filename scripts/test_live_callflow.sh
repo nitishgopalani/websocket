@@ -13,39 +13,25 @@ exec > >(tee -a "$LOG") 2>&1
 echo "======== LIVE CALL-FLOW TEST — $(date -Iseconds) ========"
 
 load_env_stack "$ROOT"
-if [[ ! -f "$ROOT/.env.live" && -f "$ROOT/.env.live.example" ]]; then
-  load_env_local "$ROOT/.env.live.example"
-fi
-export WHISPER_MODEL="${WHISPER_MODEL:-base}"
-# base on /mnt/c can exceed 4s; production target is base on fast disk/GPU under ~2s.
-export AMD_TIMEOUT_MS="${LIVE_CALLFLOW_AMD_TIMEOUT_MS:-12000}"
-export DENOISE_ENABLED="${LIVE_CALLFLOW_DENOISE:-false}"
+apply_conversation_test_env
 
 print_key_status
 require_keys || exit 1
 print_live_config
 echo ""
 
-if [[ "${LIVE_CALLFLOW_SKIP_PREFLIGHT:-true}" == "true" ]]; then
-  echo "--- Step 1: preflight SKIPPED (single callflow — protect Sarvam quota) ---"
-else
-  echo "--- Step 1: preflight ---"
-  if ! bash "$ROOT/scripts/preflight_live.sh"; then
-    echo "STOP: preflight failed — fix keys/services before call-flow test"
-    exit 1
-  fi
-fi
-echo ""
-
 FIXTURE="${LIVE_CALLFLOW_FIXTURE:-$ROOT/testdata/calls/human_long.ulaw}"
+REF_TEXT="${FIXTURE%.ulaw}.ref.txt"
 if [[ -f "$FIXTURE" ]]; then
   SPOKEN="$FIXTURE"
 else
   SPOKEN="$(bash "$ROOT/scripts/ensure_spoken_fixture.sh")"
 fi
 echo "Speech fixture: $SPOKEN"
+if [[ -f "$REF_TEXT" ]]; then
+  echo "Reference text: $(head -1 "$REF_TEXT" | cut -c1-80)..."
+fi
 
-# Pad short fixtures with silence so AMD window + ASR receive speech before session stop.
 pad_ulaw_min_secs() {
   local src="$1" min_secs="$2"
   local min_bytes=$((min_secs * 8000))
@@ -64,35 +50,13 @@ pad_ulaw_min_secs() {
 }
 SPOKEN_PADDED="$(pad_ulaw_min_secs "$SPOKEN" 10)"
 if [[ "$SPOKEN_PADDED" != "$SPOKEN" ]]; then
-  echo "Padded fixture for AMD/ASR window: $SPOKEN_PADDED"
+  echo "Padded fixture for ASR window: $SPOKEN_PADDED"
   SPOKEN="$SPOKEN_PADDED"
   PADDED_TMP="$SPOKEN"
 fi
 
 port_open() {
   ss -ltn 2>/dev/null | grep -q ":$1 " || (echo >/dev/tcp/127.0.0.1/"$1") 2>/dev/null
-}
-
-wait_ports() {
-  local deadline=$((SECONDS + 180))
-  while (( SECONDS < deadline )); do
-    port_open 9091 && port_open 9092 && port_open 9093 && return 0
-    sleep 3
-  done
-  return 1
-}
-
-wait_workers_ready() {
-  local deadline=$((SECONDS + 180))
-  while (( SECONDS < deadline )); do
-    if grep -q "faster-whisper ${WHISPER_MODEL} loaded" "$ROOT/scripts/workers.log" 2>/dev/null &&
-       grep -q 'semantic turn worker listening' "$ROOT/scripts/workers.log" 2>/dev/null; then
-      return 0
-    fi
-    sleep 2
-  done
-  echo "WARN: workers not all logged ready (AMD base can take ~20s on /mnt/c)"
-  return 1
 }
 
 SERVER_PID=""
@@ -104,37 +68,19 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "--- Step 2: workers ---"
+echo "--- Step 1: workers ---"
 bash "$ROOT/scripts/stop_workers.sh" 2>/dev/null || true
 bash "$ROOT/scripts/run_workers.sh"
-wait_ports || echo "WARN: worker ports not all open"
-wait_workers_ready || echo "WARN: worker log readiness timeout"
 
-echo "--- Step 3: brain (Collection) ---"
-bash "$ROOT/scripts/start_brain_stub.sh" 2>/dev/null || true
-sleep 2
-BRAIN_URL="${BRAIN_WS_URL:-ws://127.0.0.1:8000/ws/brain}"
-BRAIN_HTTP="${BRAIN_URL/ws:\/\//http:\/\/}"
-BRAIN_HTTP="${BRAIN_HTTP/\/ws\/brain/\/healthz}"
-brain_deadline=$((SECONDS + 30))
-while (( SECONDS < brain_deadline )); do
-  if curl -sf --max-time 2 "$BRAIN_HTTP" 2>/dev/null | grep -q '"llm_stub_mode":true'; then
-    echo "Brain health: OK stub ($BRAIN_HTTP)"
-    break
-  fi
-  sleep 2
-done
-if ! curl -sf --max-time 2 "$BRAIN_HTTP" 2>/dev/null | grep -q '"llm_stub_mode":true'; then
-  echo "WARN: brain not reachable at $BRAIN_HTTP"
-  echo "Start Collection brain (separate terminal):"
-  echo "  cd $(dirname "$ROOT")/Collection"
-  echo "  source .venv/bin/activate   # or: python3 -m venv .venv && pip install -e '.[dev]'"
-  echo "  STUB_MODE=true uvicorn app.main:app --host 0.0.0.0 --port 8000"
-  echo "Re-run preflight after brain is up."
-fi
+echo "--- Step 2: brain stub ---"
+bash "$ROOT/scripts/start_brain_stub.sh"
 
-echo "--- Step 4: Go server (live env) ---"
+echo "--- Step 3: Go server (live env) ---"
+load_env_stack "$ROOT"
+apply_conversation_test_env
+RUN_MARK="======== CALLFLOW RUN $(date -Iseconds) ========"
 : >>"$ROOT/scripts/pipeline_server.log"
+echo "$RUN_MARK" >>"$ROOT/scripts/pipeline_server.log"
 BEFORE_LOG=$(wc -l <"$ROOT/scripts/pipeline_server.log")
 go run ./cmd/server >>"$ROOT/scripts/pipeline_server.log" 2>&1 &
 SERVER_PID=$!
@@ -145,9 +91,16 @@ while (( SECONDS < deadline )); do
 done
 port_open 8080 || { echo "FAIL: server not on :8080"; tail -15 "$ROOT/scripts/pipeline_server.log"; exit 1; }
 
+echo "--- Step 4: local preflight (no Sarvam call) ---"
+if ! bash "$ROOT/scripts/preflight_local.sh"; then
+  echo "STOP: preflight not green — fix startup before callflow (protects Sarvam quota)"
+  exit 1
+fi
+echo ""
+
 WORKERS_BEFORE=$(wc -l <"$ROOT/scripts/workers.log" 2>/dev/null || echo 0)
 
-echo "--- Step 5: replay (realtime, full live loop) ---"
+echo "--- Step 5: replay (realtime, ONE live loop) ---"
 go run ./cmd/replay \
   -addr ws://127.0.0.1:8080/stream \
   -in "$SPOKEN" \
@@ -159,23 +112,35 @@ go run ./cmd/replay \
 echo "Waiting for pipeline to settle..."
 sleep 45
 
+PIPE_LOG="$(tail -n +"$BEFORE_LOG" "$ROOT/scripts/pipeline_server.log")"
+
 echo ""
 echo "======== RESULTS ========"
-echo "--- AMD (workers.log) ---"
-tail -n +"$((WORKERS_BEFORE + 1))" "$ROOT/scripts/workers.log" 2>/dev/null | grep 'amd classify' | tail -3 || echo "(none)"
+
+# Sarvam rate limit check (avoid matching unrelated log fields like target_sample_rate)
+if echo "$PIPE_LOG" | grep -qiE 'Rate limit exceeded|HTTP 429|"status":429'; then
+  echo "Sarvam: STILL COOLING DOWN (rate limited) — STOP, no retry"
+  exit 2
+fi
 
 echo "--- Sarvam ASR (pipeline_server.log) ---"
-tail -n +"$BEFORE_LOG" "$ROOT/scripts/pipeline_server.log" | grep -E '"msg":"asr (partial|final|speech)' | tail -8 || echo "(none)"
+echo "$PIPE_LOG" | grep -E '"msg":"asr (partial|final|speech)' | tail -12 || echo "(none)"
+SARVAM_FINAL="$(echo "$PIPE_LOG" | grep '"msg":"asr final"' | tail -1 || true)"
+SARVAM_PARTIAL="$(echo "$PIPE_LOG" | grep '"msg":"asr partial"' | tail -3 || true)"
+
+echo "--- Turn-taking ---"
+echo "$PIPE_LOG" | grep '"msg":"turn event"' | grep 'end_of_turn' | tail -5 || echo "(no end_of_turn logged)"
 
 echo "--- Brain / reply (pipeline_server.log) ---"
-tail -n +"$BEFORE_LOG" "$ROOT/scripts/pipeline_server.log" | grep -E '"msg":"(reply chunk|brain chunk|brain ws chunk|egress audio)"' | tail -8 || echo "(none — check brain WS + opener-on-AMD-human)"
+echo "$PIPE_LOG" | grep -E '"msg":"(reply chunk|reply done|reply error)"' | tail -10 || echo "(none)"
 
 echo "--- ElevenLabs egress ---"
-EGRESS_BYTES=$(tail -n +"$BEFORE_LOG" "$ROOT/scripts/pipeline_server.log" | grep '"msg":"egress audio"' | wc -l || true)
-echo "egress audio log lines: $EGRESS_BYTES"
+EGRESS_LINES=$(echo "$PIPE_LOG" | grep -c '"msg":"egress audio"' || true)
+echo "egress audio log lines: $EGRESS_LINES"
+echo "$PIPE_LOG" | grep '"msg":"egress audio"' | tail -3 || true
 
 echo "--- Fallbacks ---"
-tail -n +"$BEFORE_LOG" "$ROOT/scripts/pipeline_server.log" | grep -iE 'fallback|fail-open|asr event error|tts.*failed' | tail -5 || echo "(none)"
+echo "$PIPE_LOG" | grep -iE 'fallback|fail-open|asr event error|tts.*failed|brain.*fail' | tail -8 || echo "(none)"
 
 echo "--- /metrics ---"
 METRICS="$(curl -sf http://127.0.0.1:8080/metrics || true)"
@@ -187,6 +152,34 @@ if [[ -n "${M2E_COUNT:-}" && "$M2E_COUNT" != "0" ]]; then
   echo "mouth_to_ear_ms: count=$M2E_COUNT sum=$M2E_SUM avg=$((M2E_SUM / M2E_COUNT))ms"
 else
   echo "mouth_to_ear_ms: (no samples — turn may not have completed)"
+fi
+
+# PASS/FAIL heuristics
+PASS=1
+if [[ -z "$SARVAM_FINAL" ]]; then
+  echo "CHECK Sarvam final: MISSING"
+  PASS=0
+else
+  echo "CHECK Sarvam final: $SARVAM_FINAL"
+fi
+if ! echo "$PIPE_LOG" | grep -q '"msg":"reply chunk"'; then
+  echo "CHECK Brain reply: MISSING"
+  PASS=0
+else
+  echo "CHECK Brain reply: present"
+fi
+if [[ -z "${M2E_COUNT:-}" || "$M2E_COUNT" == "0" ]]; then
+  echo "CHECK mouth_to_ear_ms: MISSING"
+  PASS=0
+else
+  echo "CHECK mouth_to_ear_ms: present"
+fi
+
+echo ""
+if (( PASS == 1 )); then
+  echo "OVERALL: PASS"
+else
+  echo "OVERALL: FAIL"
 fi
 
 echo ""

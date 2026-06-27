@@ -84,3 +84,16 @@ print_live_config() {
   echo "  SARVAM_API_KEY=$(key_status SARVAM_API_KEY)"
   echo "  ELEVENLABS_API_KEY=$(key_status ELEVENLABS_API_KEY)"
 }
+
+# Conversation-pipeline test overrides (AMD off, denoise passthrough).
+apply_conversation_test_env() {
+  export AMD_ENABLED=false
+  export DENOISE_ENABLED=false
+  export SEMANTIC_TURN_ENABLED=true
+  export ASR_ENABLED=true
+  export TTS_ENABLED=true
+  export BRAIN_WS_ENABLED=true
+  export BRAIN_WS_URL="${BRAIN_WS_URL:-ws://127.0.0.1:8000/ws/brain}"
+  export EGRESS_PACING=realtime
+  export METRICS_ENABLED=true
+}
