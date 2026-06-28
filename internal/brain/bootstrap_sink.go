@@ -2,6 +2,7 @@ package brain
 
 import (
 	"context"
+	"log/slog"
 
 	"websocket/internal/media"
 )
@@ -11,6 +12,9 @@ type BootstrapSink struct {
 	Inner         media.AudioSink
 	Brain         *Client
 	TTSReply      *media.TTSReplyConsumer
+	TTSProvider   media.TTSProvider
+	TTSBaseCfg    media.TTSConfig
+	Logger        *slog.Logger
 	CarrierEgress *media.CarrierEgress
 	Observability *media.SessionObservability
 	AMDEnabled    bool
@@ -21,6 +25,21 @@ func (s *BootstrapSink) OnStart(ctx context.Context, session *media.Session) err
 	if s.Observability != nil && s.Observability.Timing != nil {
 		s.Observability.Timing.BindSession(session.StreamSID)
 		s.Observability.Timing.MarkSessionStart()
+	}
+	if s.TTSReply != nil && s.TTSProvider != nil {
+		logger := s.Logger
+		if logger == nil {
+			logger = slog.Default()
+		}
+		stream, err := media.OpenSessionTTSStream(ctx, s.TTSProvider, s.TTSBaseCfg, session, logger)
+		if err != nil {
+			logger.Warn("tts session open failed; replies will not play audio",
+				"stream_sid", session.StreamSID,
+				"error", err,
+			)
+		} else {
+			s.TTSReply.AttachStream(stream, session)
+		}
 	}
 	if s.CarrierEgress != nil {
 		if s.AMDEnabled {

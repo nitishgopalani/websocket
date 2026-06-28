@@ -38,9 +38,11 @@ type TTSStream interface {
 
 // TTSSessionMeta carries per-call metadata when opening TTS.
 type TTSSessionMeta struct {
-	StreamSID string
-	CallSID   string
-	Params    map[string]string
+	StreamSID        string
+	CallSID          string
+	Params           map[string]string
+	OutputSampleRate int
+	OutputFormat     string
 }
 
 // TTSProvider opens a persistent per-session TTS stream.

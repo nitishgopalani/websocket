@@ -58,16 +58,20 @@ func startFrameCaptureServer(t *testing.T) string {
 			return
 		}
 		var msg struct {
-			Audio string `json:"audio"`
+			Audio struct {
+				Data string `json:"data"`
+			} `json:"audio"`
 		}
 		if err := json.Unmarshal(data, &msg); err != nil {
 			return
 		}
-		decoded, err := base64.StdEncoding.DecodeString(msg.Audio)
+		decoded, err := base64.StdEncoding.DecodeString(msg.Audio.Data)
 		if err != nil {
 			return
 		}
-		lastLen.Store(int32(len(decoded)))
+		if len(decoded) > 0 {
+			lastLen.Store(int32(len(decoded)))
+		}
 	})
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)

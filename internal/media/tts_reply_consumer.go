@@ -74,6 +74,8 @@ type TTSReplyConsumer struct {
 	watchdog  *DeadAirWatchdog
 	turnMeta  map[string]TurnOutcome
 	ttsMarked map[string]bool
+
+	routeStarted bool
 }
 
 // NewTTSReplyConsumer constructs a reply consumer that streams text to TTS and routes audio to egress.
@@ -101,8 +103,29 @@ func NewTTSReplyConsumer(
 		turnMeta:     make(map[string]TurnOutcome),
 		ttsMarked:    make(map[string]bool),
 	}
-	go c.routeAudio()
+	if tts != nil {
+		c.routeStarted = true
+		go c.routeAudio()
+	}
 	return c
+}
+
+// AttachStream binds a per-session TTS stream opened after session_start (Asterisk output rate).
+func (c *TTSReplyConsumer) AttachStream(stream TTSStream, session *Session) {
+	if stream == nil || session == nil {
+		return
+	}
+	c.BindSession(session)
+	c.mu.Lock()
+	c.tts = stream
+	startRoute := !c.routeStarted
+	if startRoute {
+		c.routeStarted = true
+	}
+	c.mu.Unlock()
+	if startRoute {
+		go c.routeAudio()
+	}
 }
 
 // SetObservability attaches CT-12 timing and watchdog hooks.

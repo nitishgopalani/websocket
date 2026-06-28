@@ -137,7 +137,7 @@ func ASRConfigFromEnv() ASRConfig {
 		cfg.Mode = v
 	}
 	if v := os.Getenv("ASR_LANGUAGE"); v != "" {
-		cfg.Language = v
+		cfg.Language = NormalizeSarvamLanguage(v, nil, "")
 	}
 	if v := os.Getenv("ASR_HIGH_VAD_SENSITIVITY"); v == "0" || v == "false" || v == "FALSE" {
 		cfg.HighVADSensitivity = false

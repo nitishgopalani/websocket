@@ -47,7 +47,8 @@ func main() {
 		}
 	}
 	if carrierProfile.Variant == media.CarrierAsterisk && os.Getenv("TTS_OUTPUT_FORMAT") == "" {
-		ttsCfg.OutputFormat = "pcm_24000"
+		// Per-session output_sample_rate from session_start selects pcm_16000 vs pcm_24000.
+		ttsCfg.OutputFormat = ""
 	}
 	sessionCloser.SetCarrierProfile(carrierProfile)
 
@@ -142,17 +143,12 @@ func main() {
 		var brainClient *brain.Client
 
 		if ttsCfg.Enabled {
-			stream, err := ttsProvider.Open(context.Background(), media.TTSSessionMeta{})
-			if err != nil {
-				logger.Warn("tts stream open failed; using logging reply consumer", "error", err)
-			} else {
-				carrierEgress = media.NewCarrierEgress(egressCfg, cfg.FrameDurationMs, sessionClock, carrierSerializer, carrierProfile, logger)
-				onEndCall := func(ctx context.Context, s *media.Session) {
-					sessionCloser.EndCallSession(ctx, s)
-				}
-				ttsConsumer = media.NewTTSReplyConsumer(stream, carrierEgress, turnManager, onEndCall, logger)
-				replyConsumer = ttsConsumer
+			carrierEgress = media.NewCarrierEgress(egressCfg, cfg.FrameDurationMs, sessionClock, carrierSerializer, carrierProfile, logger)
+			onEndCall := func(ctx context.Context, s *media.Session) {
+				sessionCloser.EndCallSession(ctx, s)
 			}
+			ttsConsumer = media.NewTTSReplyConsumer(nil, carrierEgress, turnManager, onEndCall, logger)
+			replyConsumer = ttsConsumer
 		}
 
 		if brainCfg.Enabled {
@@ -225,6 +221,7 @@ func main() {
 		if brainClient != nil || ttsConsumer != nil {
 			return &brain.BootstrapSink{
 				Inner: pipeline, Brain: brainClient, TTSReply: ttsConsumer,
+				TTSProvider: ttsProvider, TTSBaseCfg: ttsCfg, Logger: logger,
 				CarrierEgress: carrierEgress, Observability: obs,
 				AMDEnabled: amdCfg.Enabled, CallControl: callControl,
 			}

@@ -43,10 +43,14 @@ func defaultTTSDial(ctx context.Context, wsURL string, header http.Header) (*web
 }
 
 func (p *ElevenLabsTTSProvider) Open(ctx context.Context, meta TTSSessionMeta) (TTSStream, error) {
+	cfg := p.cfg.withDefaults()
+	if meta.OutputFormat != "" {
+		cfg.OutputFormat = meta.OutputFormat
+	}
 	s := &elevenLabsStream{
 		provider:  p,
 		meta:      meta,
-		cfg:       p.cfg,
+		cfg:       cfg,
 		apiKey:    p.apiKey,
 		dial:      p.dial,
 		logger:    p.logger,
@@ -58,6 +62,11 @@ func (p *ElevenLabsTTSProvider) Open(ctx context.Context, meta TTSSessionMeta) (
 	if err := s.connect(ctx); err != nil {
 		return nil, err
 	}
+	p.logger.Info("elevenlabs session dialed",
+		"stream_sid", meta.StreamSID,
+		"output_format", cfg.OutputFormat,
+		"output_sample_rate", meta.OutputSampleRate,
+	)
 	s.wg.Add(1)
 	go s.readLoop()
 	return s, nil

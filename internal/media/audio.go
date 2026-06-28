@@ -152,14 +152,72 @@ func (d *l16Decoder) Decode(frame []byte) ([]byte, error) {
 }
 
 func resampleToTarget(pcm16 []byte, sourceRate, targetRate int) ([]byte, error) {
-	switch {
-	case sourceRate == targetRate:
+	if sourceRate == targetRate {
 		return pcm16, nil
-	case sourceRate == 8000 && targetRate == 16000:
-		return Resample8kTo16k(pcm16), nil
-	default:
-		return nil, fmt.Errorf("unsupported resample: %d Hz -> %d Hz", sourceRate, targetRate)
 	}
+	if sourceRate == 8000 && targetRate == 16000 {
+		return Resample8kTo16k(pcm16), nil
+	}
+	return ResamplePCM16Linear(pcm16, sourceRate, targetRate)
+}
+
+// ResamplePCM16Linear resamples mono PCM16 LE audio via linear interpolation.
+func ResamplePCM16Linear(pcm16 []byte, sourceRate, targetRate int) ([]byte, error) {
+	if sourceRate == targetRate {
+		return pcm16, nil
+	}
+	if len(pcm16) == 0 {
+		return nil, nil
+	}
+	if len(pcm16)%2 != 0 {
+		return nil, ErrInvalidPCM16Length
+	}
+	if sourceRate <= 0 || targetRate <= 0 {
+		return nil, fmt.Errorf("invalid sample rates: %d -> %d", sourceRate, targetRate)
+	}
+
+	inSamples := len(pcm16) / 2
+	if inSamples == 1 {
+		outSamples := int(float64(targetRate)/float64(sourceRate)) + 1
+		if outSamples < 1 {
+			outSamples = 1
+		}
+		out := make([]byte, outSamples*2)
+		sample := pcm16[:2]
+		for i := 0; i < outSamples; i++ {
+			copy(out[i*2:], sample)
+		}
+		return out, nil
+	}
+
+	ratio := float64(targetRate) / float64(sourceRate)
+	outSamples := int(float64(inSamples-1)*ratio) + 1
+	if outSamples < 1 {
+		outSamples = 1
+	}
+	out := make([]byte, outSamples*2)
+
+	sampleAt := func(idx float64) int16 {
+		if idx <= 0 {
+			return int16(binary.LittleEndian.Uint16(pcm16[0:2]))
+		}
+		maxIdx := float64(inSamples - 1)
+		if idx >= maxIdx {
+			return int16(binary.LittleEndian.Uint16(pcm16[(inSamples-1)*2:]))
+		}
+		lo := int(idx)
+		hi := lo + 1
+		frac := idx - float64(lo)
+		s0 := int32(int16(binary.LittleEndian.Uint16(pcm16[lo*2:])))
+		s1 := int32(int16(binary.LittleEndian.Uint16(pcm16[hi*2:])))
+		return int16(s0 + int32(frac*float64(s1-s0)))
+	}
+
+	for i := 0; i < outSamples; i++ {
+		srcIdx := float64(i) / ratio
+		binary.LittleEndian.PutUint16(out[i*2:], uint16(sampleAt(srcIdx)))
+	}
+	return out, nil
 }
 
 // ITU-T G.711 μ-law decode table.

@@ -86,12 +86,13 @@ func (s *ASRSink) OnStart(ctx context.Context, session *Session) error {
 		StreamSID:  session.StreamSID,
 		CallSID:    session.CallSID,
 		SampleRate: s.sampleRate,
-		Language:   session.Params["language"],
 		Params:     session.Params,
 	}
-	if meta.Language == "" {
-		meta.Language = DefaultASRConfig().Language
+	lang := session.Params["asr_language"]
+	if lang == "" {
+		lang = session.Params["language"]
 	}
+	meta.Language = NormalizeSarvamLanguage(lang, s.logger, session.StreamSID)
 
 	asrSession, err := s.provider.Open(ctx, meta)
 	if err != nil {

@@ -166,6 +166,29 @@ func (e *CarrierEgress) BindSession(session *Session) {
 	e.session = session
 	e.playbackStart = e.clock.Now()
 	e.stopped = false
+	rate := OutputSampleRateFromParams(session.Params)
+	if rate <= 0 {
+		rate = e.profile.EgressSampleRate
+	}
+	bytesPerSample := e.profile.EgressBytesPerSample
+	if bytesPerSample <= 0 {
+		bytesPerSample = 2
+	}
+	frameMs := int(e.frameDur / time.Millisecond)
+	if frameMs <= 0 {
+		frameMs = defaultFrameDurationMs
+	}
+	e.frameBytes = rate * frameMs / 1000 * bytesPerSample
+	if e.frameBytes < 1 {
+		e.frameBytes = 160
+	}
+	if e.logger != nil && rate > 0 {
+		e.logger.Info("egress bound to session",
+			"stream_sid", session.StreamSID,
+			"output_sample_rate", rate,
+			"frame_bytes", e.frameBytes,
+		)
+	}
 	e.mu.Unlock()
 	e.scheduleTick()
 }

@@ -229,13 +229,14 @@ func (s *sarvamSession) connectLocked(ctx context.Context) error {
 	}
 	dialN := s.dialCount.Add(1)
 
-	wsURL, queryLog, err := s.buildWSURL()
+	wsURL, queryLog, lang, err := s.buildWSURL()
 	if err != nil {
 		return err
 	}
 	s.logger.Info("sarvam ws dial",
 		"stream_sid", s.meta.StreamSID,
 		"dial", dialN,
+		"language_code", lang,
 		"url", maskSarvamWSURL(wsURL),
 		"query", queryLog,
 	)
@@ -273,17 +274,17 @@ func (s *sarvamSession) connectLocked(ctx context.Context) error {
 	return nil
 }
 
-func (s *sarvamSession) buildWSURL() (raw string, queryLog string, err error) {
+func (s *sarvamSession) buildWSURL() (raw string, queryLog string, languageCode string, err error) {
 	u, err := url.Parse(s.cfg.Endpoint)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	q := u.Query()
 	q.Set("model", s.cfg.Model)
 	q.Set("mode", s.cfg.Mode)
-	lang := s.meta.Language
+	lang := NormalizeSarvamLanguage(s.meta.Language, s.logger, s.meta.StreamSID)
 	if lang == "" || lang == "unknown" {
-		lang = s.cfg.Language
+		lang = NormalizeSarvamLanguage(s.cfg.Language, s.logger, s.meta.StreamSID)
 	}
 	if lang != "" && lang != "unknown" {
 		// AsyncAPI + SDK use hyphenated query key language-code (not language_code).
@@ -301,7 +302,7 @@ func (s *sarvamSession) buildWSURL() (raw string, queryLog string, err error) {
 			parts = append(parts, fmt.Sprintf("%s=%s", k, v))
 		}
 	}
-	return u.String(), strings.Join(parts, "&"), nil
+	return u.String(), strings.Join(parts, "&"), lang, nil
 }
 
 func (s *sarvamSession) writeAudioLocked(pcm16 []byte) error {
