@@ -199,10 +199,21 @@ def decode_request(body: bytes) -> Tuple[str, np.ndarray | None, int]:
 
 
 def handle_conn(conn: socket.socket, predictor: SmartTurnPredictor) -> None:
-    body = read_frame(conn)
-    transcript, pcm, rate = decode_request(body)
-    result = predictor.predict(transcript, pcm, rate)
-    write_response(conn, result)
+    conn.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    try:
+        while True:
+            body = read_frame(conn)
+            transcript, pcm, rate = decode_request(body)
+            result = predictor.predict(transcript, pcm, rate)
+            write_response(conn, result)
+    except ConnectionError:
+        return
+    except ValueError as exc:
+        logger.warning("connection error: %s", exc)
+        try:
+            write_response(conn, {"complete": True, "confidence": 0.5})
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def serve(bind: str, use_unix: bool, predictor: SmartTurnPredictor, stop_event: Any) -> None:

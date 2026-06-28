@@ -82,6 +82,8 @@ type Client struct {
 	sessionOpen  bool
 	turnSeq      atomic.Uint64
 	inflightTurn string
+	inflightText string
+	superseded   map[string]struct{}
 	turnManager  *media.TurnManager
 	readCancel   context.CancelFunc
 	timingHub    *media.TurnTimingHub
@@ -105,6 +107,7 @@ func NewClient(cfg Config, reply media.ReplyConsumer, turnManager *media.TurnMan
 		logger:       logger,
 		turnManager:  turnManager,
 		engineMarked: make(map[string]bool),
+		superseded:   make(map[string]struct{}),
 	}
 }
 
@@ -167,9 +170,14 @@ func (c *Client) OnTurnEvent(ctx context.Context, session *media.Session, event 
 		if !open {
 			return
 		}
+		transcript := event.Transcript
+		if stale := c.supersedeInflightTurn(session, transcript); stale != "" {
+			transcript = stale
+		}
 		turnID := c.nextTurnID()
 		c.mu.Lock()
 		c.inflightTurn = turnID
+		c.inflightText = transcript
 		c.mu.Unlock()
 		if c.timingHub != nil {
 			c.timingHub.BindEngineTurn(turnID, false)
@@ -181,7 +189,7 @@ func (c *Client) OnTurnEvent(ctx context.Context, session *media.Session, event 
 			Type:       TypeTurn,
 			SessionID:  session.StreamSID,
 			TurnID:     turnID,
-			Transcript: event.Transcript,
+			Transcript: transcript,
 			FlowClass:  FlowClassToWire(event.FlowClass),
 		}
 		if err := c.writeJSON(payload); err != nil {
@@ -202,6 +210,7 @@ func (c *Client) SendOpenerTurn(session *media.Session) error {
 	turnID := c.nextTurnID()
 	c.mu.Lock()
 	c.inflightTurn = turnID
+	c.inflightText = ""
 	c.mu.Unlock()
 	if c.timingHub != nil {
 		c.timingHub.BindEngineTurn(turnID, true)
@@ -287,28 +296,89 @@ func (c *Client) dispatchInbound(ctx context.Context, session *media.Session, da
 
 	switch m := msg.(type) {
 	case ChunkMessage:
+		if c.isSuperseded(m.TurnID) {
+			return
+		}
 		c.markEngineFirstChunk(m.TurnID)
 		c.reply.OnReplyChunk(ctx, session, m.TurnID, m.Seq, m.Text)
 	case FlowClassMessage:
+		if c.isSuperseded(m.TurnID) {
+			return
+		}
 		class := ParseFlowClassHint(m.Next)
 		if c.turnManager != nil {
 			c.turnManager.SetFlowClass(session, class)
 		}
 	case DoneMessage:
+		if c.isSuperseded(m.TurnID) {
+			return
+		}
 		c.mu.Lock()
 		if c.inflightTurn == m.TurnID {
 			c.inflightTurn = ""
+			c.inflightText = ""
 		}
 		c.mu.Unlock()
 		c.reply.OnReplyDone(ctx, session, m.TurnID, m.EndCall, m.Disposition)
 	case ErrorMessage:
+		if c.isSuperseded(m.TurnID) {
+			return
+		}
 		c.mu.Lock()
 		if c.inflightTurn == m.TurnID {
 			c.inflightTurn = ""
+			c.inflightText = ""
 		}
 		c.mu.Unlock()
 		c.reply.OnReplyError(ctx, session, m.TurnID, m.FallbackText)
 	}
+}
+
+func (c *Client) supersedeInflightTurn(session *media.Session, nextTranscript string) string {
+	c.mu.Lock()
+	staleTurn := c.inflightTurn
+	staleText := c.inflightText
+	c.mu.Unlock()
+	if staleTurn == "" {
+		return nextTranscript
+	}
+	merged := media.MergeTranscript(staleText, nextTranscript)
+	if c.logger != nil {
+		c.logger.Info("brain turn superseding inflight",
+			"stream_sid", session.StreamSID,
+			"stale_turn_id", staleTurn,
+			"merged_transcript_len", len(merged),
+		)
+	}
+	c.markSuperseded(staleTurn, session)
+	_ = c.Cancel(staleTurn)
+	return merged
+}
+
+func (c *Client) markSuperseded(turnID string, session *media.Session) {
+	c.mu.Lock()
+	c.superseded[turnID] = struct{}{}
+	c.mu.Unlock()
+	if c.watchdog != nil {
+		c.watchdog.CancelTurn(turnID)
+	}
+	if c.timingHub != nil {
+		c.timingHub.CompleteTurn(turnID, media.TurnOutcome{
+			Disposition:    "superseded",
+			Fallback:       true,
+			FallbackReason: "superseded",
+		})
+	}
+}
+
+func (c *Client) isSuperseded(turnID string) bool {
+	if turnID == "" {
+		return false
+	}
+	c.mu.Lock()
+	_, ok := c.superseded[turnID]
+	c.mu.Unlock()
+	return ok
 }
 
 func (c *Client) markEngineFirstChunk(turnID string) {
@@ -361,6 +431,7 @@ func (c *Client) Close() error {
 	defer c.mu.Unlock()
 	c.sessionOpen = false
 	c.inflightTurn = ""
+	c.inflightText = ""
 	if c.conn == nil {
 		return nil
 	}

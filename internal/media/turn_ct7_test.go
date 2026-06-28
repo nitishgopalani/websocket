@@ -142,7 +142,7 @@ func TestTurnManagerSemanticErrorFallsBackToCT6(t *testing.T) {
 
 	tm.OnSpeechStart(ctx, session)
 	tm.OnSpeechEnd(ctx, session)
-	tm.OnFinal(ctx, session, media.Transcript{Text: "hello", IsFinal: true})
+	tm.OnFinal(ctx, session, media.Transcript{Text: "hello there", IsFinal: true})
 	clock.Advance(600 * time.Millisecond)
 
 	if len(filterTurnKind(listener.events, media.TurnEndOfTurn)) != 1 {

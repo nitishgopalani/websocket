@@ -212,6 +212,43 @@ func TestTTSReplyConsumerErrorSpeaksFallback(t *testing.T) {
 	})
 }
 
+func TestTTSReplyConsumerSpeaksFirstChunkBeforeDone(t *testing.T) {
+	speakRec := &speakRecorder{}
+	wsURL, cleanup := startFakeElevenLabs(t, speakRec, nil)
+	defer cleanup()
+
+	provider, err := media.NewElevenLabsTTSProvider(testTTSConfig(wsURL))
+	if err != nil {
+		t.Fatalf("provider: %v", err)
+	}
+	stream, err := provider.Open(context.Background(), media.TTSSessionMeta{StreamSID: "MZ-STREAM"})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer stream.Close()
+
+	egress := &recordingEgress{}
+	consumer := media.NewTTSReplyConsumer(stream, egress, nil, nil, nil)
+	session := &media.Session{StreamSID: "MZ-STREAM"}
+	ctx := context.Background()
+
+	consumer.OnReplyChunk(ctx, session, "turn-stream", 0, "Pehla vakya.")
+	waitUntil(t, 2*time.Second, func() bool {
+		speakRec.mu.Lock()
+		defer speakRec.mu.Unlock()
+		return len(speakRec.calls) >= 1
+	})
+
+	consumer.OnReplyChunk(ctx, session, "turn-stream", 1, "Doosra vakya.")
+	consumer.OnReplyDone(ctx, session, "turn-stream", false, "")
+
+	waitUntil(t, 2*time.Second, func() bool {
+		speakRec.mu.Lock()
+		defer speakRec.mu.Unlock()
+		return len(speakRec.calls) >= 2
+	})
+}
+
 func TestNoopTTSProviderRegression(t *testing.T) {
 	stream, err := media.NoopTTSProvider{}.Open(context.Background(), media.TTSSessionMeta{StreamSID: "MZ-NOOP"})
 	if err != nil {

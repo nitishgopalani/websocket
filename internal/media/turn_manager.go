@@ -291,26 +291,31 @@ func (m *TurnManager) armEndpointTimerLocked(ctx context.Context, session *Sessi
 	if m.state.turnEmitted {
 		return
 	}
+	transcript := m.state.latestFinal
+	if transcript == "" {
+		transcript = m.state.latestPartial
+	}
+	silence := m.cfg.SilenceForTranscript(m.state.flowClass, transcript)
 	if m.state.latestFinal == "" {
-		m.armSilenceTimerLocked(ctx, session, m.cfg.silenceFor(m.state.flowClass))
+		m.armSilenceTimerLocked(ctx, session, silence)
 		return
 	}
 	if !m.semanticCfg.Enabled {
-		m.armSilenceTimerLocked(ctx, session, m.cfg.silenceFor(m.state.flowClass))
+		m.armSilenceTimerLocked(ctx, session, silence)
 		return
 	}
 
 	audio, rate := m.recentAudioSnapshotLocked()
 	pred, err := m.semanticTurn.Predict(ctx, m.state.latestFinal, audio, rate)
 	if err != nil {
-		m.armSilenceTimerLocked(ctx, session, m.cfg.silenceFor(m.state.flowClass))
+		m.armSilenceTimerLocked(ctx, session, silence)
 		return
 	}
 	if pred.Complete && pred.Confidence >= m.semanticCfg.ConfidenceThreshold {
 		m.armSemanticCompleteTimerLocked(ctx, session)
 		return
 	}
-	m.armSilenceTimerLocked(ctx, session, m.cfg.silenceFor(m.state.flowClass))
+	m.armSilenceTimerLocked(ctx, session, silence)
 }
 
 func (m *TurnManager) armSilenceTimerLocked(ctx context.Context, session *Session, delay time.Duration) {
@@ -337,8 +342,12 @@ func (m *TurnManager) armSemanticCompleteTimerLocked(ctx context.Context, sessio
 }
 
 func (m *TurnManager) armLongSilenceFallbackLocked(ctx context.Context, session *Session) {
-	m.stopLongSilenceFallbackTimerLocked()
 	delay := m.longSilenceFallbackDurationLocked()
+	m.armLongSilenceFallbackTimerLocked(ctx, session, delay)
+}
+
+func (m *TurnManager) armLongSilenceFallbackTimerLocked(ctx context.Context, session *Session, delay time.Duration) {
+	m.stopLongSilenceFallbackTimerLocked()
 	m.state.longSilenceFallbackTimer = m.clock.AfterFunc(delay, func() {
 		m.mu.Lock()
 		m.state.longSilenceFallbackTimer = nil
@@ -405,7 +414,17 @@ func (m *TurnManager) armLongSilenceFallback(ctx context.Context, session *Sessi
 	if m.state.turnEmitted {
 		return
 	}
-	m.armLongSilenceFallbackLocked(ctx, session)
+	delay := m.longSilenceFallbackDurationLocked()
+	m.armLongSilenceFallbackTimerLocked(ctx, session, delay)
+}
+
+func (m *TurnManager) armLongSilenceFallbackWithDelay(ctx context.Context, session *Session, delay time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.state.turnEmitted {
+		return
+	}
+	m.armLongSilenceFallbackTimerLocked(ctx, session, delay)
 }
 
 func (m *TurnManager) armMaxUtteranceTimerLocked(ctx context.Context, session *Session) {
@@ -614,6 +633,11 @@ func (m *TurnManager) Close() error {
 }
 
 func mergeASRTranscript(prev, next string) string {
+	return MergeTranscript(prev, next)
+}
+
+// MergeTranscript joins ASR fragments into one caller utterance.
+func MergeTranscript(prev, next string) string {
 	next = strings.TrimSpace(next)
 	if next == "" {
 		return prev

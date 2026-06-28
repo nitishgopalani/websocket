@@ -197,6 +197,37 @@ func TestEnergyVADDetectsSpeech(t *testing.T) {
 	}
 }
 
+func TestTurnManagerShortFragmentUsesLongerSilence(t *testing.T) {
+	clock := media.NewFakeClock(time.Now())
+	listener := &recordingTurnListener{}
+	cfg := media.EndpointConfig{
+		SilenceMs: map[media.FlowClass]int{
+			media.FlowDefault: 600,
+		},
+		DefaultSilenceMs:       600,
+		ShortFragmentSilenceMs: 950,
+		ShortFragmentMaxWords:  2,
+		MaxUtteranceMs:         5000,
+	}
+	tm := media.NewTurnManager(listener, cfg, clock, media.NoopVAD{}, nil, media.SemanticTurnConfig{}, nil, nil)
+	session := &media.Session{StreamSID: "MZ-SHORT"}
+	ctx := context.Background()
+
+	tm.OnSpeechStart(ctx, session)
+	tm.OnPartial(ctx, session, media.Transcript{Text: "Bhakti"})
+	tm.OnSpeechEnd(ctx, session)
+	tm.OnFinal(ctx, session, media.Transcript{Text: "Bhakti", IsFinal: true})
+
+	clock.Advance(850 * time.Millisecond)
+	if len(filterTurnKind(listener.events, media.TurnEndOfTurn)) != 0 {
+		t.Fatal("short fragment should not end turn at 850ms (needs 950ms)")
+	}
+	clock.Advance(120 * time.Millisecond)
+	if len(filterTurnKind(listener.events, media.TurnEndOfTurn)) != 1 {
+		t.Fatal("short fragment should end turn after 950ms silence")
+	}
+}
+
 func filterTurnKind(events []media.TurnEvent, kind media.TurnKind) []media.TurnEvent {
 	var out []media.TurnEvent
 	for _, e := range events {

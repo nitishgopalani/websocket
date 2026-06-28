@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -122,7 +123,11 @@ type RemoteSemanticTurn struct {
 	timeout time.Duration
 	logger  *slog.Logger
 
-	fallbacks atomic.Int64
+	mu   sync.Mutex
+	conn net.Conn
+
+	fallbacks  atomic.Int64
+	reconnects atomic.Int64
 }
 
 // NewRemoteSemanticTurn dials the configured semantic turn worker endpoint.
@@ -157,6 +162,7 @@ func (r *RemoteSemanticTurn) Predict(ctx context.Context, transcript string, rec
 	pred, err := r.predict(ctx, transcript, recentAudio, rate)
 	if err != nil {
 		r.fallbacks.Add(1)
+		r.invalidateConn()
 		return EOUPrediction{}, err
 	}
 	return pred, nil
@@ -168,29 +174,37 @@ func (r *RemoteSemanticTurn) predict(ctx context.Context, transcript string, rec
 		return EOUPrediction{}, err
 	}
 
-	conn, err := r.dialWithContext(ctx)
+	conn, err := r.getConn(ctx)
 	if err != nil {
 		return EOUPrediction{}, err
 	}
-	defer conn.Close()
 
-	if err := conn.SetDeadline(time.Now().Add(r.timeout)); err != nil {
+	deadline := time.Now().Add(r.timeout)
+	if err := conn.SetDeadline(deadline); err != nil {
 		return EOUPrediction{}, err
 	}
 	if _, err := conn.Write(req); err != nil {
+		r.invalidateConnLocked(conn)
 		return EOUPrediction{}, err
 	}
 
 	body, err := readLengthPrefixedPayload(conn)
 	if err != nil {
+		r.invalidateConnLocked(conn)
 		return EOUPrediction{}, err
 	}
 	return parseSemanticTurnResponse(body)
 }
 
-func (r *RemoteSemanticTurn) Close() error { return nil }
+func (r *RemoteSemanticTurn) getConn(ctx context.Context) (net.Conn, error) {
+	r.mu.Lock()
+	if r.conn != nil {
+		conn := r.conn
+		r.mu.Unlock()
+		return conn, nil
+	}
+	r.mu.Unlock()
 
-func (r *RemoteSemanticTurn) dialWithContext(ctx context.Context) (net.Conn, error) {
 	type connResult struct {
 		conn net.Conn
 		err  error
@@ -204,8 +218,48 @@ func (r *RemoteSemanticTurn) dialWithContext(ctx context.Context) (net.Conn, err
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case res := <-ch:
-		return res.conn, res.err
+		if res.err != nil {
+			return nil, res.err
+		}
+		r.mu.Lock()
+		if r.conn == nil {
+			r.conn = res.conn
+		} else {
+			_ = res.conn.Close()
+		}
+		conn := r.conn
+		r.mu.Unlock()
+		return conn, nil
 	}
+}
+
+func (r *RemoteSemanticTurn) invalidateConn() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.conn != nil {
+		_ = r.conn.Close()
+		r.conn = nil
+		r.reconnects.Add(1)
+		if r.logger != nil {
+			r.logger.Info("semantic turn worker reconnect scheduled")
+		}
+	}
+}
+
+func (r *RemoteSemanticTurn) invalidateConnLocked(conn net.Conn) {
+	if r.conn == conn {
+		_ = r.conn.Close()
+		r.conn = nil
+		r.reconnects.Add(1)
+		if r.logger != nil {
+			r.logger.Info("semantic turn worker reconnect scheduled")
+		}
+	}
+}
+
+func (r *RemoteSemanticTurn) Close() error {
+	r.invalidateConn()
+	return nil
 }
 
 type semanticTurnWireRequest struct {

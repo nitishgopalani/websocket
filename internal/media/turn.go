@@ -7,15 +7,18 @@ import (
 	"math"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
 const (
-	defaultSilenceMsYesNo     = 400
-	defaultSilenceMsDefault   = 600
-	defaultSilenceMsSpelled   = 1200
-	defaultMaxUtteranceMs     = 30000
-	defaultEnergyVADThreshold = 800.0
+	defaultSilenceMsYesNo         = 400
+	defaultSilenceMsDefault       = 850
+	defaultSilenceMsSpelled       = 1200
+	defaultShortFragmentSilenceMs = 950
+	defaultShortFragmentMaxWords  = 2
+	defaultMaxUtteranceMs         = 30000
+	defaultEnergyVADThreshold     = 800.0
 )
 
 // TurnKind categorizes turn-manager events surfaced to downstream consumers.
@@ -64,9 +67,11 @@ const (
 
 // EndpointConfig holds silence and utterance-cap settings per flow class.
 type EndpointConfig struct {
-	SilenceMs        map[FlowClass]int
-	DefaultSilenceMs int
-	MaxUtteranceMs   int
+	SilenceMs              map[FlowClass]int
+	DefaultSilenceMs       int
+	ShortFragmentSilenceMs int
+	ShortFragmentMaxWords  int
+	MaxUtteranceMs         int
 }
 
 // DefaultEndpointConfig returns CT-6 baseline endpointing thresholds.
@@ -77,8 +82,10 @@ func DefaultEndpointConfig() EndpointConfig {
 			FlowDefault:      defaultSilenceMsDefault,
 			FlowSpelledInput: defaultSilenceMsSpelled,
 		},
-		DefaultSilenceMs: defaultSilenceMsDefault,
-		MaxUtteranceMs:   defaultMaxUtteranceMs,
+		DefaultSilenceMs:       defaultSilenceMsDefault,
+		ShortFragmentSilenceMs: defaultShortFragmentSilenceMs,
+		ShortFragmentMaxWords:  defaultShortFragmentMaxWords,
+		MaxUtteranceMs:         defaultMaxUtteranceMs,
 	}
 }
 
@@ -88,6 +95,12 @@ func (c EndpointConfig) withDefaults() EndpointConfig {
 	}
 	if c.DefaultSilenceMs <= 0 {
 		c.DefaultSilenceMs = defaultSilenceMsDefault
+	}
+	if c.ShortFragmentSilenceMs <= 0 {
+		c.ShortFragmentSilenceMs = defaultShortFragmentSilenceMs
+	}
+	if c.ShortFragmentMaxWords <= 0 {
+		c.ShortFragmentMaxWords = defaultShortFragmentMaxWords
 	}
 	if c.MaxUtteranceMs <= 0 {
 		c.MaxUtteranceMs = defaultMaxUtteranceMs
@@ -101,6 +114,34 @@ func (c EndpointConfig) silenceFor(class FlowClass) time.Duration {
 		ms = c.DefaultSilenceMs
 	}
 	return time.Duration(ms) * time.Millisecond
+}
+
+// SilenceForTranscript returns endpoint silence tuned for natural pacing; short fragments
+// (e.g. a name spoken with a mid-word pause) wait slightly longer before EndOfTurn.
+func (c EndpointConfig) SilenceForTranscript(class FlowClass, transcript string) time.Duration {
+	base := c.silenceFor(class)
+	if class != FlowDefault {
+		return base
+	}
+	text := strings.TrimSpace(transcript)
+	if text == "" {
+		return base
+	}
+	maxWords := c.ShortFragmentMaxWords
+	if maxWords <= 0 {
+		maxWords = defaultShortFragmentMaxWords
+	}
+	if len(strings.Fields(text)) >= maxWords {
+		return base
+	}
+	shortMs := c.ShortFragmentSilenceMs
+	if shortMs <= 0 {
+		shortMs = defaultShortFragmentSilenceMs
+	}
+	if shortMs > int(base/time.Millisecond) {
+		return time.Duration(shortMs) * time.Millisecond
+	}
+	return base
 }
 
 // EndpointConfigFromEnv loads endpoint thresholds from environment variables.
@@ -120,6 +161,11 @@ func EndpointConfigFromEnv() EndpointConfig {
 	if v := os.Getenv("SILENCE_MS_SPELLED"); v != "" {
 		if ms, err := strconv.Atoi(v); err == nil {
 			cfg.SilenceMs[FlowSpelledInput] = ms
+		}
+	}
+	if v := os.Getenv("SILENCE_MS_SHORT_FRAGMENT"); v != "" {
+		if ms, err := strconv.Atoi(v); err == nil {
+			cfg.ShortFragmentSilenceMs = ms
 		}
 	}
 	if v := os.Getenv("MAX_UTTERANCE_MS"); v != "" {
