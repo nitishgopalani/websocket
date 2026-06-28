@@ -25,14 +25,25 @@ const (
 	TypeError     = "error"
 )
 
+// BorrowerContextPayload carries per-call campaign variables (Excel upload / metadata).
+type BorrowerContextPayload struct {
+	BorrowerName string  `json:"borrower_name,omitempty"`
+	Phone        string  `json:"phone,omitempty"`
+	AmountDue    any     `json:"amount_due,omitempty"`
+	AccountRef   string  `json:"account_ref,omitempty"`
+	Language     string  `json:"language,omitempty"`
+}
+
 // SessionStartPayload opens a persistent EB-6 session.
 type SessionStartPayload struct {
-	Type       string `json:"type"`
-	SessionID  string `json:"session_id"`
-	BorrowerID string `json:"borrower_id"`
-	AgentID    string `json:"agent_id"`
-	PackID     string `json:"pack_id,omitempty"`
-	Locale     string `json:"locale,omitempty"`
+	Type            string                  `json:"type"`
+	SessionID       string                  `json:"session_id"`
+	BorrowerID      string                  `json:"borrower_id"`
+	AgentID         string                  `json:"agent_id"`
+	PackID          string                  `json:"pack_id,omitempty"`
+	Locale          string                  `json:"locale,omitempty"`
+	TenantID        string                  `json:"tenant_id,omitempty"`
+	BorrowerContext *BorrowerContextPayload `json:"borrower_context,omitempty"`
 }
 
 // TurnPayload sends a caller turn after EndOfTurn (or empty transcript for opener).

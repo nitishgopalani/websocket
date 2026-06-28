@@ -144,6 +144,8 @@ func (c *Client) Connect(ctx context.Context, session *media.Session) error {
 		AgentID:    sessionParam(session, c.cfg.AgentIDParam, "default"),
 		PackID:     sessionParam(session, c.cfg.PackIDParam, ""),
 		Locale:     sessionParam(session, c.cfg.LocaleParam, "hi-IN"),
+		TenantID:        sessionParam(session, "tenant_id", c.cfg.TenantID),
+		BorrowerContext: buildBorrowerContext(session),
 	}
 	if err := c.writeJSON(start); err != nil {
 		_ = c.Close()
@@ -420,6 +422,35 @@ func sessionParam(session *media.Session, key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func buildBorrowerContext(session *media.Session) *BorrowerContextPayload {
+	if session == nil || session.Params == nil {
+		return nil
+	}
+	ctx := &BorrowerContextPayload{
+		BorrowerName: sessionParam(session, "borrower_name", ""),
+		AccountRef:   sessionParam(session, "account_ref", ""),
+		Language:     sessionParam(session, "language", ""),
+	}
+	phone := sessionParam(session, "customer_phone", "")
+	if phone == "" {
+		phone = sessionParam(session, "phone", "")
+	}
+	if phone == "" {
+		phone = sessionParam(session, "borrower_phone", "")
+	}
+	if phone != "" {
+		ctx.Phone = phone
+	}
+	if amount := sessionParam(session, "amount_due", ""); amount != "" {
+		ctx.AmountDue = amount
+	}
+	if ctx.BorrowerName == "" && ctx.Phone == "" && ctx.AmountDue == nil &&
+		ctx.AccountRef == "" && ctx.Language == "" {
+		return nil
+	}
+	return ctx
 }
 
 // Close sends session_end and closes the WebSocket.
