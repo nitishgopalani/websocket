@@ -16,11 +16,25 @@ services:
   brain:
     image: fonada/voice-brain:latest
     restart: unless-stopped
+    env_file:
+      - .env
     environment:
-      STUB_MODE: "true"
-      LLM_STUB: "true"
-      KB_STUB: "true"
-      TOOLS_MODE: stub
+      # Live brain: set STUB_MODE/LLM_STUB/KB_STUB=false in .env (see .env.example).
+      STUB_MODE: ${STUB_MODE:-true}
+      LLM_STUB: ${LLM_STUB:-true}
+      KB_STUB: ${KB_STUB:-true}
+      TOOLS_MODE: ${TOOLS_MODE:-stub}
+      GCP_PROJECT_ID: ${GCP_PROJECT_ID:-}
+      GCP_REGION: ${GCP_REGION:-us-central1}
+      GEMINI_MODEL_ID: ${GEMINI_MODEL_ID:-gemini-2.5-flash}
+      KB_BASE_URL: ${KB_BASE_URL:-https://api.fonada.ai}
+      KB_SEARCH_PATH: ${KB_SEARCH_PATH:-/search}
+      KB_API_KEY: ${KB_API_KEY:-}
+      GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS:-/run/secrets/gcp-sa.json}
+    volumes:
+      # Live brain: set GCP_CREDENTIALS_HOST_PATH in .env to the host SA JSON (chmod 600).
+      # Default stub path is a placeholder file shipped in the bundle (not valid for Vertex).
+      - ${GCP_CREDENTIALS_HOST_PATH:-./secrets/gcp-sa.json.stub}:/run/secrets/gcp-sa.json:ro
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://127.0.0.1:8000/healthz"]
       interval: 10s
@@ -60,7 +74,10 @@ services:
       SEMANTIC_TURN_ADDR: semantic-turn:9093
       CARRIER: asterisk
       TARGET_SAMPLE_RATE: "16000"
-      TTS_OUTPUT_FORMAT: pcm_24000
+      # Per-session output_sample_rate from session_start selects pcm_16000 vs pcm_24000.
+      TTS_OUTPUT_FORMAT: ${TTS_OUTPUT_FORMAT:-}
+      # Real Gemini + TTS need more time than stub; holding line plays after this ms (see watchdog.go).
+      FALLBACK_NO_AUDIO_MS: ${FALLBACK_NO_AUDIO_MS:-7000}
     depends_on:
       brain:
         condition: service_healthy
