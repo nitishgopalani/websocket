@@ -59,8 +59,8 @@ func NewSmokeHarness(cfg SmokeHarnessConfig) (*SmokeHarness, error) {
 	}
 
 	metrics := media.NewMetrics(media.MetricsConfig{Enabled: cfg.MetricsEnabled})
-	asrProvider := FakeASRProvider{cfg: cfg.ASR}
-	ttsProvider := FakeTTSProvider{cfg: cfg.TTS}
+	asrProvider := &FakeASRProvider{cfg: cfg.ASR}
+	ttsProvider := &FakeTTSProvider{cfg: cfg.TTS}
 
 	egressCfg := media.DefaultEgressConfig()
 	egressCfg.Pacing = "burst"

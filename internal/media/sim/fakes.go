@@ -25,9 +25,22 @@ type FakeASRConfig struct {
 // FakeASRProvider emits canned transcript events after N audio frames.
 type FakeASRProvider struct {
 	cfg FakeASRConfig
+
+	mu       sync.Mutex
+	lastMeta media.ASRSessionMeta
 }
 
-func (p FakeASRProvider) Open(_ context.Context, _ media.ASRSessionMeta) (media.ASRSession, error) {
+// LastMeta returns the most recent ASRSessionMeta passed to Open.
+func (p *FakeASRProvider) LastMeta() media.ASRSessionMeta {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.lastMeta
+}
+
+func (p *FakeASRProvider) Open(_ context.Context, meta media.ASRSessionMeta) (media.ASRSession, error) {
+	p.mu.Lock()
+	p.lastMeta = meta
+	p.mu.Unlock()
 	cfg := p.cfg
 	if cfg.FramesBeforeFinal <= 0 {
 		cfg.FramesBeforeFinal = 5
@@ -88,9 +101,22 @@ type FakeTTSConfig struct {
 // FakeTTSProvider synthesizes μ-law audio on Speak().
 type FakeTTSProvider struct {
 	cfg FakeTTSConfig
+
+	mu       sync.Mutex
+	lastMeta media.TTSSessionMeta
 }
 
-func (p FakeTTSProvider) Open(_ context.Context, _ media.TTSSessionMeta) (media.TTSStream, error) {
+// LastMeta returns the most recent TTSSessionMeta passed to Open.
+func (p *FakeTTSProvider) LastMeta() media.TTSSessionMeta {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.lastMeta
+}
+
+func (p *FakeTTSProvider) Open(_ context.Context, meta media.TTSSessionMeta) (media.TTSStream, error) {
+	p.mu.Lock()
+	p.lastMeta = meta
+	p.mu.Unlock()
 	cfg := p.cfg
 	if cfg.FramesPerSpeak <= 0 {
 		cfg.FramesPerSpeak = 3
