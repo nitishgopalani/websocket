@@ -13,9 +13,28 @@ services:
       timeout: 3s
       retries: 10
 
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-collections}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-collections}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-collections} -d ${POSTGRES_DB:-collections}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    # Internal compose network only — no host port mapping.
+
   brain:
     image: fonada/voice-brain:latest
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
     env_file:
       - .env
     environment:
@@ -31,6 +50,7 @@ services:
       KB_SEARCH_PATH: ${KB_SEARCH_PATH:-/search}
       KB_API_KEY: ${KB_API_KEY:-}
       GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS:-/run/secrets/gcp-sa.json}
+      BORROWER_DATABASE_URL: postgresql://${POSTGRES_USER:-collections}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-collections}
     volumes:
       # Live brain: set GCP_CREDENTIALS_HOST_PATH in .env to the host SA JSON (chmod 600).
       # Default stub path is a placeholder file shipped in the bundle (not valid for Vertex).
@@ -99,3 +119,6 @@ services:
     depends_on:
       go-server:
         condition: service_healthy
+
+volumes:
+  postgres_data:
