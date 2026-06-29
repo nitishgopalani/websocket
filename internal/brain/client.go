@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -483,6 +484,34 @@ func resolveBrainLocale(session *media.Session) string {
 	return "hi-IN"
 }
 
+// phoneFromStreamSID extracts the caller's 10-digit number embedded as the
+// trailing digits of the stream SID (e.g. "...-e69810587857" -> "9810587857").
+// Asterisk sends empty customer_phone, so this is the only reliable source.
+func phoneFromStreamSID(streamSID string) string {
+	if streamSID == "" {
+		return ""
+	}
+	segment := streamSID
+	if idx := strings.LastIndex(streamSID, "-"); idx >= 0 {
+		segment = streamSID[idx+1:]
+	}
+	var digits []rune
+	for _, r := range segment {
+		if r >= '0' && r <= '9' {
+			digits = append(digits, r)
+		}
+	}
+	if len(digits) < 10 {
+		return ""
+	}
+	last10 := string(digits[len(digits)-10:])
+	// Indian mobile numbers start with 6-9; guard against random hex digits.
+	if last10[0] < '6' || last10[0] > '9' {
+		return ""
+	}
+	return last10
+}
+
 func buildBorrowerContext(session *media.Session) *BorrowerContextPayload {
 	if session == nil || session.Params == nil {
 		return nil
@@ -504,6 +533,11 @@ func buildBorrowerContext(session *media.Session) *BorrowerContextPayload {
 	}
 	if phone == "" && session.CallSID != "" {
 		phone = session.CallSID
+	}
+	if phone == "" {
+		// Asterisk sends empty customer_phone; the dialer embeds the caller's
+		// 10-digit number as the trailing digits of the stream SID.
+		phone = phoneFromStreamSID(session.StreamSID)
 	}
 	if phone != "" {
 		ctx.Phone = phone
