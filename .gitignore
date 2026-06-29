@@ -18,3 +18,11 @@ scripts/live_callflow.log
 
 # Generated call fixtures (local intermediates)
 testdata/calls/human_bundled.*
+testdata/calls/*_synthetic.*
+
+# Deploy bundles and local logs (never commit)
+deploy/*.tar.gz
+scripts/brain.log
+scripts/verify_*.log
+scripts/workers.log.bak
+workers/**/__pycache__/
