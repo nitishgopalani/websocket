@@ -56,6 +56,7 @@ type TTSConfig struct {
 	APIKey         string
 	VoiceID        string
 	Model          string
+	Language       string
 	OutputFormat   string
 	BaseURL        string
 	ReconnectBase  time.Duration
@@ -116,6 +117,9 @@ func TTSConfigFromEnv() TTSConfig {
 	}
 	if v := os.Getenv("ELEVENLABS_MODEL"); v != "" {
 		cfg.Model = v
+	}
+	if v := os.Getenv("ELEVENLABS_LANGUAGE"); v != "" {
+		cfg.Language = v
 	}
 	if v := os.Getenv("TTS_OUTPUT_FORMAT"); v != "" {
 		cfg.OutputFormat = v

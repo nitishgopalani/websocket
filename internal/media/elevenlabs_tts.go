@@ -109,6 +109,10 @@ func (s *elevenLabsStream) buildWSURL() string {
 	q := u.Query()
 	q.Set("model_id", s.cfg.Model)
 	q.Set("output_format", s.cfg.OutputFormat)
+	if s.cfg.Language != "" {
+		// Enforce pronunciation language (e.g. "hi") for multilingual models.
+		q.Set("language_code", s.cfg.Language)
+	}
 	if s.cfg.InactivitySecs > 0 {
 		q.Set("inactivity_timeout", fmt.Sprintf("%d", s.cfg.InactivitySecs))
 	}
