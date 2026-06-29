@@ -19,10 +19,11 @@ const (
 
 // Inbound message types (brain → Go).
 const (
-	TypeChunk     = "chunk"
-	TypeFlowClass = "flow_class"
-	TypeDone      = "done"
-	TypeError     = "error"
+	TypeSessionReady = "session_ready"
+	TypeChunk        = "chunk"
+	TypeFlowClass    = "flow_class"
+	TypeDone         = "done"
+	TypeError        = "error"
 )
 
 // BorrowerContextPayload carries per-call campaign variables (Excel upload / metadata).
@@ -66,6 +67,15 @@ type CancelPayload struct {
 type SessionEndPayload struct {
 	Type      string `json:"type"`
 	SessionID string `json:"session_id"`
+}
+
+// SessionReadyPayload acknowledges session_start with resolved borrower ASR locale.
+type SessionReadyPayload struct {
+	Type         string `json:"type"`
+	SessionID    string `json:"session_id"`
+	BorrowerID   string `json:"borrower_id,omitempty"`
+	BorrowerName string `json:"borrower_name,omitempty"`
+	AsrLanguage  string `json:"asr_language"`
 }
 
 // ChunkMessage is one TTS-able sentence chunk of the gated reply.
@@ -178,6 +188,12 @@ func decodeInbound(data []byte) (string, error) {
 
 func unmarshalInbound(data []byte, typ string) (any, error) {
 	switch typ {
+	case TypeSessionReady:
+		var msg SessionReadyPayload
+		if err := json.Unmarshal(data, &msg); err != nil {
+			return nil, err
+		}
+		return msg, nil
 	case TypeChunk:
 		var msg ChunkMessage
 		if err := json.Unmarshal(data, &msg); err != nil {

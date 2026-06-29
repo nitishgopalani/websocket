@@ -110,8 +110,8 @@ func TestAsteriskProtocolSmoke(t *testing.T) {
 	if result.OutboundBinaryBytes == 0 {
 		t.Fatal("expected outbound binary TTS audio")
 	}
-	if got := asrProvider.LastMeta().Language; got != "en-IN" {
-		t.Fatalf("ASR language = %q, want en-IN", got)
+	if got := asrProvider.LastMeta().Language; got != "hi-IN" {
+		t.Fatalf("ASR language = %q, want hi-IN", got)
 	}
 	ttsMeta := ttsProvider.LastMeta()
 	if ttsMeta.OutputSampleRate != 16000 {

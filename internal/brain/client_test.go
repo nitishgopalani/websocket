@@ -58,6 +58,12 @@ func TestClientSessionStartAndTurn(t *testing.T) {
 				if err := json.Unmarshal(data, &gotStart); err != nil {
 					t.Fatalf("session_start: %v", err)
 				}
+				_ = conn.WriteJSON(brain.SessionReadyPayload{
+					Type:        brain.TypeSessionReady,
+					SessionID:   gotStart.SessionID,
+					BorrowerID:  gotStart.BorrowerID,
+					AsrLanguage: "hi-IN",
+				})
 			case brain.TypeTurn:
 				if err := json.Unmarshal(data, &gotTurn); err != nil {
 					t.Fatalf("turn: %v", err)
@@ -101,6 +107,9 @@ func TestClientSessionStartAndTurn(t *testing.T) {
 	}
 	if gotStart.SessionID != "MZ-EB6" || gotStart.BorrowerID != "bor-1" {
 		t.Fatalf("session_start = %+v", gotStart)
+	}
+	if session.Params["asr_language"] != "hi-IN" {
+		t.Fatalf("asr_language = %q, want hi-IN", session.Params["asr_language"])
 	}
 	if gotTurn.Transcript != "haan" || gotTurn.FlowClass != "YesNo" {
 		t.Fatalf("turn = %+v", gotTurn)

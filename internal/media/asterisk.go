@@ -120,9 +120,7 @@ func AsteriskStartToStartEvent(s AsteriskSessionStart) StartEvent {
 			params[k] = v
 		}
 	}
-	if lang := params["language"]; lang != "" {
-		params["asr_language"] = lang
-	}
+	params["asr_language"] = ResolveSessionASRLanguage(params, nil, s.SessionID)
 
 	return StartEvent{
 		Event:     EventStart,

@@ -25,7 +25,7 @@ var bareLanguageToSarvam = map[string]string{
 	"mni": "mni-IN", "brx": "brx-IN", "mai": "mai-IN", "doi": "doi-IN",
 }
 
-const defaultSarvamLanguage = "en-IN"
+const defaultSarvamLanguage = "hi-IN"
 
 // SarvamLanguageDefault returns the configured fallback locale (LANG_DEFAULT, then ASR_LANGUAGE).
 func SarvamLanguageDefault() string {
@@ -101,4 +101,37 @@ func NormalizeSarvamLanguage(raw string, logger *slog.Logger, streamSID string) 
 		)
 	}
 	return out
+}
+
+// ResolveSessionASRLanguage picks Sarvam locale from session params (asr_language, language, locale).
+func ResolveSessionASRLanguage(params map[string]string, logger *slog.Logger, streamSID string) string {
+	if params != nil {
+		for _, key := range []string{"asr_language", "language", "locale"} {
+			if v := strings.TrimSpace(params[key]); v != "" {
+				return NormalizeSarvamLanguage(v, logger, streamSID)
+			}
+		}
+	}
+	return SarvamLanguageDefault()
+}
+
+// ApplySessionASRLanguage stores normalized locale on the session for ASR dial.
+func ApplySessionASRLanguage(session *Session, lang string, logger *slog.Logger) {
+	if session == nil {
+		return
+	}
+	if session.Params == nil {
+		session.Params = map[string]string{}
+	}
+	resolved := NormalizeSarvamLanguage(lang, logger, session.StreamSID)
+	session.Params["asr_language"] = resolved
+	if strings.TrimSpace(session.Params["language"]) == "" {
+		session.Params["language"] = resolved
+	}
+	if logger != nil {
+		logger.Info("asr language resolved",
+			"stream_sid", session.StreamSID,
+			"language_code", resolved,
+		)
+	}
 }

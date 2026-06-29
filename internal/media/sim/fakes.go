@@ -206,6 +206,17 @@ func StartFakeBrainServer(t testingTB, cfg FakeBrainConfig) (string, func()) {
 				continue
 			}
 			switch header.Type {
+			case brain.TypeSessionStart:
+				var start brain.SessionStartPayload
+				if err := json.Unmarshal(data, &start); err != nil {
+					continue
+				}
+				_ = conn.WriteJSON(brain.SessionReadyPayload{
+					Type:        brain.TypeSessionReady,
+					SessionID:   start.SessionID,
+					BorrowerID:  start.BorrowerID,
+					AsrLanguage: "hi-IN",
+				})
 			case brain.TypeTurn:
 				var turn brain.TurnPayload
 				if err := json.Unmarshal(data, &turn); err != nil {

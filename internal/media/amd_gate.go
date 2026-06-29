@@ -234,13 +234,13 @@ func (g *AMDGateSink) applyDecision(ctx context.Context, session *Session, decis
 		return nil
 	default:
 		g.state = amdStateHuman
+		g.listener.OnHuman(ctx, session)
 		if err := g.startDownstream(ctx, session); err != nil {
 			return err
 		}
 		if err := g.flushBuffer(ctx, session); err != nil {
 			return err
 		}
-		g.listener.OnHuman(ctx, session)
 		return nil
 	}
 }

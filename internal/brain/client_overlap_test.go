@@ -73,6 +73,14 @@ func TestClientSupersedesInflightTurnOnOverlap(t *testing.T) {
 			}
 			switch header.Type {
 			case brain.TypeSessionStart:
+				var start brain.SessionStartPayload
+				_ = json.Unmarshal(data, &start)
+				_ = conn.WriteJSON(brain.SessionReadyPayload{
+					Type:        brain.TypeSessionReady,
+					SessionID:   start.SessionID,
+					BorrowerID:  start.BorrowerID,
+					AsrLanguage: "hi-IN",
+				})
 			case brain.TypeCancel:
 				var cancel brain.CancelPayload
 				_ = json.Unmarshal(data, &cancel)

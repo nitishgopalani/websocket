@@ -2,12 +2,14 @@ package brain
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/gorilla/websocket"
 
@@ -151,6 +153,12 @@ func (c *Client) Connect(ctx context.Context, session *media.Session) error {
 		_ = c.Close()
 		return err
 	}
+	if err := c.readSessionReady(conn, session); err != nil {
+		c.logger.Warn("brain session_ready missed; using session ASR default",
+			"error", err,
+			"stream_sid", session.StreamSID,
+		)
+	}
 
 	readCtx, cancel := context.WithCancel(context.Background())
 	c.readCancel = cancel
@@ -262,6 +270,38 @@ func (c *Client) Cancel(turnID string) error {
 	return nil
 }
 
+func (c *Client) readSessionReady(conn *websocket.Conn, session *media.Session) error {
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
+
+	_, data, err := conn.ReadMessage()
+	if err != nil {
+		media.ApplySessionASRLanguage(session, "", c.logger)
+		return err
+	}
+	typ, err := decodeInbound(data)
+	if err != nil {
+		media.ApplySessionASRLanguage(session, "", c.logger)
+		return err
+	}
+	if typ != TypeSessionReady {
+		media.ApplySessionASRLanguage(session, "", c.logger)
+		return fmt.Errorf("expected %q, got %q", TypeSessionReady, typ)
+	}
+	var ready SessionReadyPayload
+	if err := json.Unmarshal(data, &ready); err != nil {
+		return err
+	}
+	media.ApplySessionASRLanguage(session, ready.AsrLanguage, c.logger)
+	c.logger.Info("brain session_ready",
+		"stream_sid", session.StreamSID,
+		"borrower_id", ready.BorrowerID,
+		"borrower_name", ready.BorrowerName,
+		"language_code", session.Params["asr_language"],
+	)
+	return nil
+}
+
 func (c *Client) readLoop(ctx context.Context, session *media.Session) {
 	for {
 		select {
@@ -297,6 +337,12 @@ func (c *Client) dispatchInbound(ctx context.Context, session *media.Session, da
 	}
 
 	switch m := msg.(type) {
+	case SessionReadyPayload:
+		c.logger.Info("brain session_ready (late)",
+			"stream_sid", session.StreamSID,
+			"language_code", m.AsrLanguage,
+		)
+		media.ApplySessionASRLanguage(session, m.AsrLanguage, c.logger)
 	case ChunkMessage:
 		if c.isSuperseded(m.TurnID) {
 			return

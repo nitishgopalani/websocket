@@ -12,11 +12,11 @@ func TestNormalizeSarvamLanguage(t *testing.T) {
 		{"en-IN", "en-IN"},
 		{"hi", "hi-IN"},
 		{"en-US", "en-IN"},
-		{"", "en-IN"},
-		{"unknown", "en-IN"},
+		{"", "hi-IN"},
+		{"unknown", "hi-IN"},
 		{"ta", "ta-IN"},
 		{"doi", "doi-IN"},
-		{"junk", "en-IN"},
+		{"junk", "hi-IN"},
 	}
 	for _, tc := range tests {
 		got := NormalizeSarvamLanguage(tc.in, nil, "test")
