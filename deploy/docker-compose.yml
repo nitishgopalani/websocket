@@ -50,7 +50,8 @@ services:
       KB_SEARCH_PATH: ${KB_SEARCH_PATH:-/search}
       KB_API_KEY: ${KB_API_KEY:-}
       GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS:-/run/secrets/gcp-sa.json}
-      BORROWER_DATABASE_URL: postgresql://${POSTGRES_USER:-collections}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-collections}
+      POSTGRES_HOST: postgres
+      # Brain builds BORROWER_DATABASE_URL from POSTGRES_* in .env (URL-encodes password).
     volumes:
       # Live brain: set GCP_CREDENTIALS_HOST_PATH in .env to the host SA JSON (chmod 600).
       # Default stub path is a placeholder file shipped in the bundle (not valid for Vertex).
