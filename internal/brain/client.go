@@ -145,7 +145,7 @@ func (c *Client) Connect(ctx context.Context, session *media.Session) error {
 		BorrowerID: sessionParam(session, c.cfg.BorrowerIDParam, "unknown"),
 		AgentID:    sessionParam(session, c.cfg.AgentIDParam, "default"),
 		PackID:     sessionParam(session, c.cfg.PackIDParam, ""),
-		Locale:     sessionParam(session, c.cfg.LocaleParam, "hi-IN"),
+		Locale:          resolveBrainLocale(session),
 		TenantID:        sessionParam(session, "tenant_id", c.cfg.TenantID),
 		BorrowerContext: buildBorrowerContext(session),
 	}
@@ -470,6 +470,19 @@ func sessionParam(session *media.Session, key, fallback string) string {
 	return fallback
 }
 
+func resolveBrainLocale(session *media.Session) string {
+	if session == nil {
+		return "hi-IN"
+	}
+	if v := sessionParam(session, "locale", ""); v != "" {
+		return v
+	}
+	if v := sessionParam(session, "language", ""); v != "" {
+		return media.NormalizeSarvamLanguage(v, nil, session.StreamSID)
+	}
+	return "hi-IN"
+}
+
 func buildBorrowerContext(session *media.Session) *BorrowerContextPayload {
 	if session == nil || session.Params == nil {
 		return nil
@@ -485,6 +498,12 @@ func buildBorrowerContext(session *media.Session) *BorrowerContextPayload {
 	}
 	if phone == "" {
 		phone = sessionParam(session, "borrower_phone", "")
+	}
+	if phone == "" {
+		phone = sessionParam(session, "call_sid", "")
+	}
+	if phone == "" && session.CallSID != "" {
+		phone = session.CallSID
 	}
 	if phone != "" {
 		ctx.Phone = phone
