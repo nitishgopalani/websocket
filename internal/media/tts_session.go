@@ -101,6 +101,16 @@ func OpenSessionTTSStream(
 			streamSID:  session.StreamSID,
 		}
 	}
+	// Outermost layer: cache the final (post-resample) audio so a repeat of the exact
+	// same spoken line skips both the TTS network call and resampling. Key includes
+	// provider/voice/model/language/format/rate so any of those changing invalidates it.
+	if ttsCacheEnabled() {
+		prefix := strings.Join([]string{
+			base.Provider, base.VoiceID, base.Model, base.Language,
+			format, strconv.Itoa(targetRate),
+		}, "|")
+		stream = newCachingTTSStream(stream, prefix, GlobalTTSCache(), logger, session.StreamSID)
+	}
 	return stream, nil
 }
 
