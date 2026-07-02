@@ -35,6 +35,12 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    # The live human-transfer endpoint (voip.ivrobd.com) is reached over the carrier's
+    # internal network; that mapping only exists in the host's /etc/hosts, which Docker
+    # containers do NOT inherit. Pin it here so the brain resolves the hostname to the
+    # internal IP (keeps TLS/SNI on the hostname). Override via TRANSFER_HOST_ENTRY in .env.
+    extra_hosts:
+      - "${TRANSFER_HOST_ENTRY:-voip.ivrobd.com:10.10.10.67}"
     env_file:
       - .env
     environment:
