@@ -144,10 +144,10 @@ func (c *Client) Connect(ctx context.Context, session *media.Session) error {
 		Type:       TypeSessionStart,
 		SessionID:  session.StreamSID,
 		BorrowerID: sessionParam(session, c.cfg.BorrowerIDParam, "unknown"),
-		AgentID:    sessionParam(session, c.cfg.AgentIDParam, "default"),
+		AgentID:    resolveBrainAgentID(session, c.cfg.AgentIDParam),
 		PackID:     sessionParam(session, c.cfg.PackIDParam, ""),
 		Locale:          resolveBrainLocale(session),
-		TenantID:        sessionParam(session, "tenant_id", c.cfg.TenantID),
+		TenantID:        resolveBrainTenant(session, c.cfg.TenantID),
 		BorrowerContext: buildBorrowerContext(session),
 	}
 	if err := c.writeJSON(start); err != nil {
@@ -469,6 +469,28 @@ func sessionParam(session *media.Session, key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// resolveBrainTenant picks the tenant announced to the brain. An explicit
+// tenant_id param wins; otherwise the connector's client_id IS the tenant id
+// (the brain's Phase C routing treats client_id as the owning tenant), falling
+// back to the static BRAIN_TENANT_ID. Without this mapping the connector's
+// per-DID client_id (e.g. "booking-confirm") never reached the brain.
+func resolveBrainTenant(session *media.Session, fallback string) string {
+	if v := sessionParam(session, "tenant_id", ""); v != "" {
+		return v
+	}
+	return sessionParam(session, "client_id", fallback)
+}
+
+// resolveBrainAgentID forwards the connector's metadata.agent_id (already
+// merged into session params by AsteriskStartToStartEvent) and only defaults
+// to "default" when no agent id was supplied anywhere.
+func resolveBrainAgentID(session *media.Session, agentParam string) string {
+	if v := sessionParam(session, agentParam, ""); v != "" {
+		return v
+	}
+	return "default"
 }
 
 func resolveBrainLocale(session *media.Session) string {
