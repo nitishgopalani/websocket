@@ -67,8 +67,9 @@ func (p *ElevenLabsTTSProvider) Open(ctx context.Context, meta TTSSessionMeta) (
 		"output_format", cfg.OutputFormat,
 		"output_sample_rate", meta.OutputSampleRate,
 	)
-	s.wg.Add(1)
+	s.wg.Add(2)
 	go s.readLoop()
+	go s.keepaliveLoop()
 	return s, nil
 }
 
@@ -94,6 +95,9 @@ type elevenLabsStream struct {
 
 	reconnects atomic.Int64
 	fallbacks  atomic.Int64
+	// lastWriteNano is the unixnano of the last text frame written; the
+	// keepalive loop uses it to ping only genuinely idle connections.
+	lastWriteNano atomic.Int64
 }
 
 func (s *elevenLabsStream) Reconnects() int64 { return s.reconnects.Load() }
@@ -159,8 +163,48 @@ func (s *elevenLabsStream) sendInitLocked() error {
 	if err := s.conn.WriteMessage(websocket.TextMessage, payload); err != nil {
 		return err
 	}
+	s.lastWriteNano.Store(time.Now().UnixNano())
 	s.initialized = true
 	return nil
+}
+
+// keepaliveLoop pings the stream-input socket during silences so the server's
+// inactivity_timeout (20s) never fires between turns — reconnect cost (~dial +
+// init) would otherwise land on the first audio after a hold or a long caller
+// pause. A single space with NO flush resets ElevenLabs' inactivity timer
+// without triggering generation (per the stream-input docs). Pings are sent
+// only when the connection has been idle, so mid-generation turns are never
+// touched.
+func (s *elevenLabsStream) keepaliveLoop() {
+	defer s.wg.Done()
+	idle := time.Duration(s.cfg.InactivitySecs) * time.Second * 3 / 4 // 15s at the 20s default
+	if idle <= 0 {
+		idle = 15 * time.Second
+	}
+	ticker := time.NewTicker(idle / 3)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.done:
+			return
+		case <-ticker.C:
+		}
+		last := s.lastWriteNano.Load()
+		if last == 0 || time.Since(time.Unix(0, last)) < idle {
+			continue
+		}
+		s.mu.Lock()
+		conn := s.conn
+		s.mu.Unlock()
+		if conn == nil {
+			continue
+		}
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"text":" "}`)); err != nil {
+			// Read loop will observe the broken socket and reconnect.
+			continue
+		}
+		s.lastWriteNano.Store(time.Now().UnixNano())
+	}
 }
 
 func (s *elevenLabsStream) Speak(turnID string, text string) error {
@@ -198,6 +242,7 @@ func (s *elevenLabsStream) Speak(turnID string, text string) error {
 		s.emitFailSoft(turnID)
 		return nil
 	}
+	s.lastWriteNano.Store(time.Now().UnixNano())
 	return nil
 }
 

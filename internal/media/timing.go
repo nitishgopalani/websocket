@@ -373,8 +373,28 @@ func (h *TurnTimingHub) CompleteTurn(turnID string, outcome TurnOutcome) {
 			"fallback", outcome.Fallback,
 			"fallback_reason", outcome.FallbackReason,
 			"barge_in", outcome.BargeIn,
+			// Absolute epoch-ms stage timestamps: joined with the brain's
+			// prompt_turn_latency line (same session_id + turn_id) they give
+			// the full cross-service mouth-to-ear breakdown.
+			"asr_final_ts_ms", t.stageEpochMS(StageASRFinal),
+			"engine_sent_ts_ms", t.stageEpochMS(StageEngineSent),
+			"engine_first_chunk_ts_ms", t.stageEpochMS(StageEngineFirstChunk),
+			"tts_first_audio_ts_ms", t.stageEpochMS(StageTTSFirstAudio),
+			"egress_first_frame_ts_ms", t.stageEpochMS(StageEgressFirstFrame),
 		)
 	}
+}
+
+// stageEpochMS returns the absolute epoch-ms timestamp of a stage mark, or -1
+// when the stage never happened.
+func (t *TurnTiming) stageEpochMS(stage string) int64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	at, ok := t.marks[stage]
+	if !ok {
+		return -1
+	}
+	return at.UnixMilli()
 }
 
 // ActiveTurnID returns the in-flight reply turn ID for egress/watchdog correlation.
