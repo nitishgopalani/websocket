@@ -154,6 +154,11 @@ func main() {
 		if brainCfg.Enabled {
 			brainClient = brain.NewClient(brainCfg, replyConsumer, turnManager, logger)
 			turnManager.SetListener(brainClient)
+			if ttsConsumer != nil {
+				// Tell the brain when each reply's audio finishes playing so
+				// it can sequence consult-start / reprompt timers on it.
+				ttsConsumer.SetPlaybackDoneNotifier(brainClient)
+			}
 		}
 
 		callControl.Bind(brainClient, ttsConsumer, carrierEgress, sessionCloser)

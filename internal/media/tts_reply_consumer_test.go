@@ -249,6 +249,72 @@ func TestTTSReplyConsumerSpeaksFirstChunkBeforeDone(t *testing.T) {
 	})
 }
 
+type recordingPlaybackDone struct {
+	mu    sync.Mutex
+	turns []string
+}
+
+func (r *recordingPlaybackDone) NotifyPlaybackDone(_ *media.Session, turnID string) {
+	r.mu.Lock()
+	r.turns = append(r.turns, turnID)
+	r.mu.Unlock()
+}
+
+func TestTTSReplyConsumerNotifiesPlaybackDoneAndDelaysEndCall(t *testing.T) {
+	speakRec := &speakRecorder{}
+	wsURL, cleanup := startFakeElevenLabs(t, speakRec, nil)
+	defer cleanup()
+
+	provider, err := media.NewElevenLabsTTSProvider(testTTSConfig(wsURL))
+	if err != nil {
+		t.Fatalf("provider: %v", err)
+	}
+	stream, err := provider.Open(context.Background(), media.TTSSessionMeta{StreamSID: "MZ-PBD"})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer stream.Close()
+
+	egress := &recordingEgress{}
+	var endCallAt atomic.Int64
+	consumer := media.NewTTSReplyConsumer(stream, egress, nil, func(_ context.Context, _ *media.Session) {
+		endCallAt.Store(time.Now().UnixNano())
+	}, nil)
+	notifier := &recordingPlaybackDone{}
+	consumer.SetPlaybackDoneNotifier(notifier)
+
+	session := &media.Session{StreamSID: "MZ-PBD"}
+	consumer.BindSession(session)
+	ctx := context.Background()
+
+	// end_call with a 150ms grace: playback_done fires immediately at playback
+	// completion; the hangup lands only after the delay.
+	consumer.SetEndCallDelay("turn-bye", 150*time.Millisecond)
+	start := time.Now()
+	consumer.OnReplyChunk(ctx, session, "turn-bye", 0, "Dhanyavaad, namaste.")
+	consumer.OnReplyDone(ctx, session, "turn-bye", true, "COMPLETED")
+
+	waitUntil(t, 3*time.Second, func() bool {
+		notifier.mu.Lock()
+		defer notifier.mu.Unlock()
+		return len(notifier.turns) >= 1
+	})
+	notifier.mu.Lock()
+	if notifier.turns[0] != "turn-bye" {
+		t.Fatalf("playback_done turns = %v", notifier.turns)
+	}
+	notifier.mu.Unlock()
+	if endCallAt.Load() != 0 {
+		t.Fatal("end call must not fire before the grace delay")
+	}
+
+	waitUntil(t, 3*time.Second, func() bool { return endCallAt.Load() != 0 })
+	elapsed := time.Duration(endCallAt.Load() - start.UnixNano())
+	if elapsed < 150*time.Millisecond {
+		t.Fatalf("end call fired after %v, want >= 150ms", elapsed)
+	}
+}
+
 func TestNoopTTSProviderRegression(t *testing.T) {
 	stream, err := media.NoopTTSProvider{}.Open(context.Background(), media.TTSSessionMeta{StreamSID: "MZ-NOOP"})
 	if err != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"time"
 )
 
 // AudioEgress receives synthesized audio for outbound playback (CT-10 implements Fonada WS).
@@ -56,18 +57,28 @@ func (e *LoggingEgress) ClearPlayback(_ context.Context, session *Session) error
 // SessionCloseHook is invoked when the brain signals end_call after playback mark.
 type SessionCloseHook func(ctx context.Context, session *Session)
 
+// PlaybackDoneNotifier is told when a reply turn's audio has finished playing
+// to the caller (last paced frame egressed / carrier mark echoed). The brain
+// client implements this to forward a playback_done message so the engine can
+// sequence actions that must wait for the caller to HEAR a line first.
+type PlaybackDoneNotifier interface {
+	NotifyPlaybackDone(session *Session, turnID string)
+}
+
 // TTSReplyConsumer implements ReplyConsumer: text chunks → TTS → AudioEgress.
 type TTSReplyConsumer struct {
-	tts         TTSStream
-	egress      AudioEgress
-	turnManager *TurnManager
-	onEndCall   SessionCloseHook
-	logger      *slog.Logger
+	tts          TTSStream
+	egress       AudioEgress
+	turnManager  *TurnManager
+	onEndCall    SessionCloseHook
+	playbackDone PlaybackDoneNotifier
+	logger       *slog.Logger
 
 	mu            sync.Mutex
 	session       *Session
 	pendingMark   map[string]bool
 	endCallAfter  map[string]bool
+	endCallDelay  map[string]time.Duration
 	agentSpeaking bool
 
 	timingHub *TurnTimingHub
@@ -100,6 +111,7 @@ func NewTTSReplyConsumer(
 		logger:       logger,
 		pendingMark:  make(map[string]bool),
 		endCallAfter: make(map[string]bool),
+		endCallDelay: make(map[string]time.Duration),
 		turnMeta:     make(map[string]TurnOutcome),
 		ttsMarked:    make(map[string]bool),
 	}
@@ -134,6 +146,26 @@ func (c *TTSReplyConsumer) SetObservability(timing *TurnTimingHub, watchdog *Dea
 	c.watchdog = watchdog
 }
 
+// SetPlaybackDoneNotifier attaches the brain client so it can forward
+// playback_done to the engine when a turn's audio finishes playing.
+func (c *TTSReplyConsumer) SetPlaybackDoneNotifier(n PlaybackDoneNotifier) {
+	c.mu.Lock()
+	c.playbackDone = n
+	c.mu.Unlock()
+}
+
+// SetEndCallDelay makes an end_call turn hang up this long AFTER its playback
+// completes (brain's done.end_call_delay_ms), e.g. a 3s grace period after
+// "I am disconnecting this call". Call before OnReplyDone for the turn.
+func (c *TTSReplyConsumer) SetEndCallDelay(turnID string, d time.Duration) {
+	if turnID == "" || d <= 0 {
+		return
+	}
+	c.mu.Lock()
+	c.endCallDelay[turnID] = d
+	c.mu.Unlock()
+}
+
 // SpeakHoldingLine plays a configured holding utterance (dead-air watchdog).
 func (c *TTSReplyConsumer) SpeakHoldingLine(ctx context.Context, session *Session, turnID, text string) {
 	if text == "" || session == nil {
@@ -158,6 +190,7 @@ func (c *TTSReplyConsumer) CancelTTS(turnID string) {
 	c.mu.Lock()
 	delete(c.pendingMark, turnID)
 	delete(c.endCallAfter, turnID)
+	delete(c.endCallDelay, turnID)
 	c.agentSpeaking = false
 	c.mu.Unlock()
 }
@@ -285,9 +318,7 @@ func (c *TTSReplyConsumer) routeAudio() {
 			if c.turnManager != nil {
 				c.turnManager.SetAgentSpeaking(session, false)
 			}
-			if endCall && c.onEndCall != nil {
-				c.onEndCall(context.Background(), session)
-			}
+			c.finishPlayback(context.Background(), session, chunk.TurnID, endCall)
 			c.completeTurnTiming(chunk.TurnID)
 			continue
 		}
@@ -308,10 +339,34 @@ func (c *TTSReplyConsumer) OnPlaybackComplete(ctx context.Context, session *Sess
 	if c.turnManager != nil {
 		c.turnManager.SetAgentSpeaking(session, false)
 	}
-	if endCall && c.onEndCall != nil {
-		c.onEndCall(ctx, session)
-	}
+	c.finishPlayback(ctx, session, turnID, endCall)
 	c.completeTurnTiming(turnID)
+}
+
+// finishPlayback runs the post-playback actions for a reply turn: tell the
+// brain playback finished, then hang up (immediately or after the brain's
+// requested grace delay) when the turn carried end_call.
+func (c *TTSReplyConsumer) finishPlayback(ctx context.Context, session *Session, turnID string, endCall bool) {
+	c.mu.Lock()
+	delay := c.endCallDelay[turnID]
+	delete(c.endCallDelay, turnID)
+	notifier := c.playbackDone
+	c.mu.Unlock()
+	if notifier != nil {
+		notifier.NotifyPlaybackDone(session, turnID)
+	}
+	if !endCall || c.onEndCall == nil {
+		return
+	}
+	if delay > 0 {
+		if c.logger != nil {
+			c.logger.Info("end_call delayed after playback",
+				"stream_sid", session.StreamSID, "turn_id", turnID, "delay_ms", delay.Milliseconds())
+		}
+		time.AfterFunc(delay, func() { c.onEndCall(context.Background(), session) })
+		return
+	}
+	c.onEndCall(ctx, session)
 }
 
 func (c *TTSReplyConsumer) completeTurnTiming(turnID string) {

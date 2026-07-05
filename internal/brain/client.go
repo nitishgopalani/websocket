@@ -248,6 +248,31 @@ func (c *Client) sendCancel(session *media.Session) {
 	_ = c.Cancel(turnID)
 }
 
+// NotifyPlaybackDone implements media.PlaybackDoneNotifier: forwards a
+// playback_done message so the brain can sequence post-announcement actions
+// (consult start, no-input reprompt timer) on the moment the caller has
+// actually heard the line.
+func (c *Client) NotifyPlaybackDone(session *media.Session, turnID string) {
+	if !c.cfg.Enabled || turnID == "" {
+		return
+	}
+	c.mu.Lock()
+	open := c.sessionOpen && c.conn != nil
+	sessionID := c.sessionID
+	c.mu.Unlock()
+	if !open {
+		return
+	}
+	if err := c.writeJSON(PlaybackDonePayload{
+		Type:      TypePlaybackDone,
+		SessionID: sessionID,
+		TurnID:    turnID,
+	}); err != nil {
+		c.logger.Warn("brain playback_done send failed",
+			"error", err, "stream_sid", sessionID, "turn_id", turnID)
+	}
+}
+
 // Cancel sends a brain cancel for an in-flight turn (CT-8 / CT-11 barge-in commit).
 func (c *Client) Cancel(turnID string) error {
 	if !c.cfg.Enabled || turnID == "" {
@@ -368,6 +393,13 @@ func (c *Client) dispatchInbound(ctx context.Context, session *media.Session, da
 			c.inflightText = ""
 		}
 		c.mu.Unlock()
+		if m.EndCall && m.EndCallDelayMs > 0 {
+			if d, ok := c.reply.(interface {
+				SetEndCallDelay(turnID string, delay time.Duration)
+			}); ok {
+				d.SetEndCallDelay(m.TurnID, time.Duration(m.EndCallDelayMs)*time.Millisecond)
+			}
+		}
 		c.reply.OnReplyDone(ctx, session, m.TurnID, m.EndCall, m.Disposition)
 	case ErrorMessage:
 		if c.isSuperseded(m.TurnID) {

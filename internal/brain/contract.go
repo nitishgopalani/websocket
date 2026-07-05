@@ -15,6 +15,7 @@ const (
 	TypeTurn         = "turn"
 	TypeCancel       = "cancel"
 	TypeSessionEnd   = "session_end"
+	TypePlaybackDone = "playback_done"
 )
 
 // Inbound message types (brain → Go).
@@ -69,6 +70,17 @@ type SessionEndPayload struct {
 	SessionID string `json:"session_id"`
 }
 
+// PlaybackDonePayload tells the brain a turn's audio finished playing to the
+// caller (last paced frame egressed / carrier mark echoed). The brain uses it
+// to sequence actions that must wait for the caller to HEAR a line first
+// (e.g. start a consult only after the hold announcement completes) and to
+// arm its no-input reprompt timer.
+type PlaybackDonePayload struct {
+	Type      string `json:"type"`
+	SessionID string `json:"session_id"`
+	TurnID    string `json:"turn_id"`
+}
+
 // SessionReadyPayload acknowledges session_start with resolved borrower ASR locale.
 type SessionReadyPayload struct {
 	Type         string `json:"type"`
@@ -99,7 +111,10 @@ type DoneMessage struct {
 	TurnID      string `json:"turn_id"`
 	Disposition string `json:"disposition,omitempty"`
 	EndCall     bool   `json:"end_call,omitempty"`
-	AuditID     string `json:"audit_id,omitempty"`
+	// EndCallDelayMs delays the hangup this long AFTER the turn's playback
+	// completes (e.g. 3s grace after "I am disconnecting this call").
+	EndCallDelayMs int    `json:"end_call_delay_ms,omitempty"`
+	AuditID        string `json:"audit_id,omitempty"`
 }
 
 // ErrorMessage is a fail-safe fallback line on brain error/deadline.
