@@ -121,9 +121,9 @@ func TestTTSReplyConsumerRoutesAudioAndMark(t *testing.T) {
 	defer stream.Close()
 
 	egress := &recordingEgress{}
-	endCall := false
+	var endCall atomic.Bool
 	consumer := media.NewTTSReplyConsumer(stream, egress, nil, func(_ context.Context, _ *media.Session) {
-		endCall = true
+		endCall.Store(true)
 	}, nil)
 
 	session := &media.Session{StreamSID: "MZ-TTS"}
@@ -138,14 +138,12 @@ func TestTTSReplyConsumerRoutesAudioAndMark(t *testing.T) {
 		defer egress.mu.Unlock()
 		return len(egress.marks) >= 1 && len(egress.chunks) >= 3
 	})
+	waitUntil(t, 3*time.Second, func() bool { return endCall.Load() })
 
 	egress.mu.Lock()
 	defer egress.mu.Unlock()
 	if len(egress.marks) != 1 || egress.marks[0] != "turn-1" {
 		t.Fatalf("marks = %v", egress.marks)
-	}
-	if !endCall {
-		t.Fatal("expected endCall propagated")
 	}
 	for i, c := range egress.chunks {
 		if c.TurnID != "turn-1" {
@@ -313,6 +311,91 @@ func TestTTSReplyConsumerNotifiesPlaybackDoneAndDelaysEndCall(t *testing.T) {
 	if elapsed < 150*time.Millisecond {
 		t.Fatalf("end call fired after %v, want >= 150ms", elapsed)
 	}
+}
+
+// startFakeElevenLabsNoFinal mimics the REAL ElevenLabs stream-input behavior
+// on a persistent connection: audio chunks per flush but never an isFinal
+// event (isFinal only comes when the whole socket-level generation closes).
+func startFakeElevenLabsNoFinal(t *testing.T) (string, func()) {
+	t.Helper()
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			_, data, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			var msg struct {
+				Text string `json:"text"`
+			}
+			if err := json.Unmarshal(data, &msg); err != nil {
+				continue
+			}
+			if strings.TrimSpace(msg.Text) == "" {
+				continue // flush/keepalive: no isFinal on a live connection
+			}
+			for i := 0; i < 3; i++ {
+				payload := base64.StdEncoding.EncodeToString([]byte{byte(i + 1), byte(i + 2)})
+				_ = conn.WriteJSON(map[string]any{"audio": payload})
+			}
+		}
+	}))
+	return "ws" + strings.TrimPrefix(srv.URL, "http"), srv.Close
+}
+
+func TestTTSReplyConsumerFinalFallbackWithoutIsFinal(t *testing.T) {
+	wsURL, cleanup := startFakeElevenLabsNoFinal(t)
+	defer cleanup()
+
+	provider, err := media.NewElevenLabsTTSProvider(testTTSConfig(wsURL))
+	if err != nil {
+		t.Fatalf("provider: %v", err)
+	}
+	stream, err := provider.Open(context.Background(), media.TTSSessionMeta{StreamSID: "MZ-NOFIN"})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer stream.Close()
+
+	egress := &recordingEgress{}
+	var endCallAt atomic.Int64
+	consumer := media.NewTTSReplyConsumer(stream, egress, nil, func(_ context.Context, _ *media.Session) {
+		endCallAt.Store(time.Now().UnixNano())
+	}, nil)
+	notifier := &recordingPlaybackDone{}
+	consumer.SetPlaybackDoneNotifier(notifier)
+
+	session := &media.Session{StreamSID: "MZ-NOFIN"}
+	consumer.BindSession(session)
+	ctx := context.Background()
+
+	consumer.OnReplyChunk(ctx, session, "turn-hold", 0, "Please hold the line.")
+	consumer.OnReplyDone(ctx, session, "turn-hold", true, "COMPLETED")
+
+	// No isFinal ever arrives; the local fallback must still mark the turn,
+	// notify playback_done, and run end_call.
+	waitUntil(t, 3*time.Second, func() bool {
+		egress.mu.Lock()
+		defer egress.mu.Unlock()
+		return len(egress.marks) >= 1
+	})
+	egress.mu.Lock()
+	if egress.marks[0] != "turn-hold" {
+		t.Fatalf("marks = %v", egress.marks)
+	}
+	egress.mu.Unlock()
+
+	waitUntil(t, 3*time.Second, func() bool {
+		notifier.mu.Lock()
+		defer notifier.mu.Unlock()
+		return len(notifier.turns) == 1 && notifier.turns[0] == "turn-hold"
+	})
+	waitUntil(t, 3*time.Second, func() bool { return endCallAt.Load() != 0 })
 }
 
 func TestNoopTTSProviderRegression(t *testing.T) {

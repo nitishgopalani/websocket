@@ -65,6 +65,14 @@ type PlaybackDoneNotifier interface {
 	NotifyPlaybackDone(session *Session, turnID string)
 }
 
+// defaultTTSFinalFallback is how long after the brain's done (and the last TTS
+// audio chunk for the turn) we wait before finalizing the turn ourselves.
+// ElevenLabs stream-input does NOT emit isFinal per flush on a persistent
+// connection, so without this fallback the egress mark — and everything keyed
+// on it (playback_done to the brain, end_call hangup, turn timing) — never
+// fires.
+const defaultTTSFinalFallback = 400 * time.Millisecond
+
 // TTSReplyConsumer implements ReplyConsumer: text chunks → TTS → AudioEgress.
 type TTSReplyConsumer struct {
 	tts          TTSStream
@@ -80,6 +88,10 @@ type TTSReplyConsumer struct {
 	endCallAfter  map[string]bool
 	endCallDelay  map[string]time.Duration
 	agentSpeaking bool
+
+	finalFallback time.Duration
+	finalTimers   map[string]*time.Timer
+	finalized     map[string]bool
 
 	timingHub *TurnTimingHub
 	watchdog  *DeadAirWatchdog
@@ -104,16 +116,19 @@ func NewTTSReplyConsumer(
 		logger = slog.Default()
 	}
 	c := &TTSReplyConsumer{
-		tts:          tts,
-		egress:       egress,
-		turnManager:  turnManager,
-		onEndCall:    onEndCall,
-		logger:       logger,
-		pendingMark:  make(map[string]bool),
-		endCallAfter: make(map[string]bool),
-		endCallDelay: make(map[string]time.Duration),
-		turnMeta:     make(map[string]TurnOutcome),
-		ttsMarked:    make(map[string]bool),
+		tts:           tts,
+		egress:        egress,
+		turnManager:   turnManager,
+		onEndCall:     onEndCall,
+		logger:        logger,
+		pendingMark:   make(map[string]bool),
+		endCallAfter:  make(map[string]bool),
+		endCallDelay:  make(map[string]time.Duration),
+		finalFallback: defaultTTSFinalFallback,
+		finalTimers:   make(map[string]*time.Timer),
+		finalized:     make(map[string]bool),
+		turnMeta:      make(map[string]TurnOutcome),
+		ttsMarked:     make(map[string]bool),
 	}
 	if tts != nil {
 		c.routeStarted = true
@@ -191,6 +206,7 @@ func (c *TTSReplyConsumer) CancelTTS(turnID string) {
 	delete(c.pendingMark, turnID)
 	delete(c.endCallAfter, turnID)
 	delete(c.endCallDelay, turnID)
+	c.stopFinalTimerLocked(turnID)
 	c.agentSpeaking = false
 	c.mu.Unlock()
 }
@@ -238,6 +254,7 @@ func (c *TTSReplyConsumer) OnReplyDone(ctx context.Context, session *Session, tu
 		c.endCallAfter[turnID] = true
 	}
 	c.turnMeta[turnID] = TurnOutcome{Disposition: disposition, EndCall: endCall}
+	c.armFinalFallbackLocked(turnID)
 	c.mu.Unlock()
 
 	if c.timingHub != nil {
@@ -285,6 +302,11 @@ func (c *TTSReplyConsumer) routeAudio() {
 			if markTTS {
 				c.ttsMarked[chunk.TurnID] = true
 			}
+			// Audio still flowing for a done turn: push the final-fallback
+			// deadline out so it fires ~finalFallback after the LAST chunk.
+			if c.pendingMark[chunk.TurnID] {
+				c.armFinalFallbackLocked(chunk.TurnID)
+			}
 			c.mu.Unlock()
 			if markTTS && c.timingHub != nil {
 				c.timingHub.MarkTurn(chunk.TurnID, StageTTSFirstAudio)
@@ -297,36 +319,77 @@ func (c *TTSReplyConsumer) routeAudio() {
 		if !chunk.Final {
 			continue
 		}
-
-		c.mu.Lock()
-		mark := c.pendingMark[chunk.TurnID]
-		endCall := c.endCallAfter[chunk.TurnID]
-		delete(c.pendingMark, chunk.TurnID)
-		c.mu.Unlock()
-
-		if mark {
-			if err := c.egress.Mark(context.Background(), session, chunk.TurnID); err != nil && c.logger != nil {
-				c.logger.Warn("egress mark failed", "error", err)
-			}
-			if de, ok := c.egress.(DeferredPlaybackEgress); ok && de.DefersPlaybackComplete() {
-				continue
-			}
-			c.mu.Lock()
-			delete(c.endCallAfter, chunk.TurnID)
-			c.agentSpeaking = false
-			c.mu.Unlock()
-			if c.turnManager != nil {
-				c.turnManager.SetAgentSpeaking(session, false)
-			}
-			c.finishPlayback(context.Background(), session, chunk.TurnID, endCall)
-			c.completeTurnTiming(chunk.TurnID)
-			continue
-		}
-
-		c.mu.Lock()
-		delete(c.endCallAfter, chunk.TurnID)
-		c.mu.Unlock()
+		c.finalizeTurn(chunk.TurnID)
 	}
+}
+
+// armFinalFallbackLocked (re)schedules local turn finalization. ElevenLabs
+// stream-input does not emit isFinal per flush on a persistent connection, so
+// a genuine Final chunk may never arrive; without this the egress mark — and
+// everything keyed on it (playback_done to the brain, end_call hangup, turn
+// timing) — silently never fires. Re-armed on every audio chunk of a done
+// turn, so it triggers finalFallback after synthesis output stops.
+func (c *TTSReplyConsumer) armFinalFallbackLocked(turnID string) {
+	if c.finalFallback <= 0 || c.finalized[turnID] {
+		return
+	}
+	if t := c.finalTimers[turnID]; t != nil {
+		t.Stop()
+	}
+	c.finalTimers[turnID] = time.AfterFunc(c.finalFallback, func() {
+		c.finalizeTurn(turnID)
+	})
+}
+
+func (c *TTSReplyConsumer) stopFinalTimerLocked(turnID string) {
+	if t := c.finalTimers[turnID]; t != nil {
+		t.Stop()
+		delete(c.finalTimers, turnID)
+	}
+}
+
+// finalizeTurn completes a reply turn's synthesis phase: registers the egress
+// mark and (for non-deferred egress) runs post-playback actions. Called from
+// a genuine TTS Final chunk or the final-fallback timer; idempotent per turn.
+// If the brain's done has not arrived yet (no pendingMark), it leaves state
+// alone — OnReplyDone re-arms the fallback which finalizes later.
+func (c *TTSReplyConsumer) finalizeTurn(turnID string) {
+	c.mu.Lock()
+	if c.finalized[turnID] {
+		c.mu.Unlock()
+		return
+	}
+	c.stopFinalTimerLocked(turnID)
+	if !c.pendingMark[turnID] {
+		c.mu.Unlock()
+		return
+	}
+	c.finalized[turnID] = true
+	session := c.session
+	endCall := c.endCallAfter[turnID]
+	delete(c.pendingMark, turnID)
+	c.mu.Unlock()
+	if session == nil {
+		return
+	}
+
+	if err := c.egress.Mark(context.Background(), session, turnID); err != nil && c.logger != nil {
+		c.logger.Warn("egress mark failed", "error", err)
+	}
+	if de, ok := c.egress.(DeferredPlaybackEgress); ok && de.DefersPlaybackComplete() {
+		// Playback completion arrives later via OnPlaybackComplete when the
+		// paced egress drains past the mark.
+		return
+	}
+	c.mu.Lock()
+	delete(c.endCallAfter, turnID)
+	c.agentSpeaking = false
+	c.mu.Unlock()
+	if c.turnManager != nil {
+		c.turnManager.SetAgentSpeaking(session, false)
+	}
+	c.finishPlayback(context.Background(), session, turnID, endCall)
+	c.completeTurnTiming(turnID)
 }
 
 // OnPlaybackComplete is invoked when the carrier echoes a mark after playback reaches it.
