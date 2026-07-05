@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -52,10 +53,14 @@ type TTSProvider interface {
 
 // TTSConfig controls TTS provider selection.
 type TTSConfig struct {
-	Enabled        bool
-	APIKey         string
+	Enabled  bool
+	Provider string // "elevenlabs" (default) or "sarvam"
+	APIKey   string
+	// For Sarvam, VoiceID holds the speaker name (e.g. "abhilash") and Model the
+	// model id (e.g. "bulbul:v2").
 	VoiceID        string
 	Model          string
+	Language       string
 	OutputFormat   string
 	BaseURL        string
 	ReconnectBase  time.Duration
@@ -108,6 +113,10 @@ func TTSConfigFromEnv() TTSConfig {
 	if v := os.Getenv("TTS_ENABLED"); v == "1" || v == "true" || v == "TRUE" {
 		cfg.Enabled = true
 	}
+	cfg.Provider = strings.ToLower(strings.TrimSpace(os.Getenv("TTS_PROVIDER")))
+	if cfg.Provider == "sarvam" {
+		return sarvamTTSConfigFromEnv(cfg)
+	}
 	if v := os.Getenv("ELEVENLABS_API_KEY"); v != "" {
 		cfg.APIKey = v
 	}
@@ -116,6 +125,9 @@ func TTSConfigFromEnv() TTSConfig {
 	}
 	if v := os.Getenv("ELEVENLABS_MODEL"); v != "" {
 		cfg.Model = v
+	}
+	if v := os.Getenv("ELEVENLABS_LANGUAGE"); v != "" {
+		cfg.Language = v
 	}
 	if v := os.Getenv("TTS_OUTPUT_FORMAT"); v != "" {
 		cfg.OutputFormat = v
@@ -136,7 +148,8 @@ func TTSConfigFromEnv() TTSConfig {
 	return cfg.withDefaults()
 }
 
-// NewTTSProvider returns Noop when disabled, ElevenLabs when enabled.
+// NewTTSProvider returns Noop when disabled, else the configured provider
+// (ElevenLabs by default, Sarvam when TTS_PROVIDER=sarvam).
 func NewTTSProvider(cfg TTSConfig) (TTSProvider, error) {
 	cfg = cfg.withDefaults()
 	if !cfg.Enabled {
@@ -144,6 +157,9 @@ func NewTTSProvider(cfg TTSConfig) (TTSProvider, error) {
 	}
 	if cfg.APIKey == "" {
 		return nil, ErrTTSNotConfigured
+	}
+	if strings.ToLower(strings.TrimSpace(cfg.Provider)) == "sarvam" {
+		return NewSarvamTTSProvider(cfg)
 	}
 	return NewElevenLabsTTSProvider(cfg)
 }
