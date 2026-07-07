@@ -85,6 +85,35 @@ nano .env   # paste SARVAM_API_KEY and ELEVENLABS_API_KEY only here
 Defaults in `.env.example` set `DENOISE_ENABLED=false`, `AMD_ENABLED=false` (CPU-friendly asterisk path).
 Enable full workers: `docker compose --profile full up -d` and set `DENOISE_ENABLED=true` / `AMD_ENABLED=true`.
 
+### Telephony caller IDs (never dial anonymous)
+
+The ng trunk rejects anonymous INVITEs with SIP 480 **before the phone
+rings** — every outbound leg must carry a caller ID (normally an inbound DID):
+
+| Variable | Where | Used for |
+|----------|-------|----------|
+| `CONSULT_CALLER_ID` | brain `.env` | consult (property/owner) leg |
+| `TRANSFER_CALLER_ID` | brain `.env` | warm-transfer agent leg when the flow's `caller_id` slot is empty |
+| `DEFAULT_TRANSFER_CALLER_ID` | `/etc/ari-orchestrator/ari-orchestrator.env` | orchestrator backstop: applied when a transfer request arrives with no `caller_id` at all |
+
+The orchestrator logs a WARNING (`originating with EMPTY caller id`) if a dial
+is still about to go out anonymous — treat that as a config bug.
+
+### Asterisk file logging (SIP traces)
+
+`/var/log/asterisk/full` has twice stopped growing silently after service
+restarts (last: 2026-07-07 13:51), losing the SIP traces needed for call
+post-mortems. After any deploy/restart touching Asterisk or the orchestrator,
+run:
+
+```bash
+asterisk -rx 'logger reload'
+tail -1 /var/log/asterisk/full   # must show a fresh timestamp
+```
+
+The redeploy scripts (`scripts/redeploy_main_tips*.sh` in the Main workspace)
+now do this automatically as a post-deploy step.
+
 ## 4. Load and start (on server)
 
 ```bash
