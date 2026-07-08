@@ -7,6 +7,13 @@ import (
 	"websocket/internal/media"
 )
 
+func isTapOnlySession(session *media.Session) bool {
+	if session == nil || session.Params == nil {
+		return false
+	}
+	return session.Params["tap_only"] == "true"
+}
+
 // BootstrapSink wraps an AudioSink to connect/disconnect the EB-6 brain client per session.
 type BootstrapSink struct {
 	Inner         media.AudioSink
@@ -62,11 +69,13 @@ func (s *BootstrapSink) OnStart(ctx context.Context, session *media.Session) err
 		if s.CallControl != nil {
 			s.CallControl.markBrainConnected()
 		}
-		if err := s.Brain.SendOpenerTurn(session); err != nil {
-			return err
-		}
-		if s.CallControl != nil {
-			s.CallControl.recordOpener()
+		if !isTapOnlySession(session) {
+			if err := s.Brain.SendOpenerTurn(session); err != nil {
+				return err
+			}
+			if s.CallControl != nil {
+				s.CallControl.recordOpener()
+			}
 		}
 	}
 	if s.Inner == nil {

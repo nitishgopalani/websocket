@@ -92,11 +92,13 @@ func (c *CallControl) OnHuman(ctx context.Context, session *media.Session) {
 			c.brainConnected = true
 			c.mu.Unlock()
 		}
-		if err := brain.SendOpenerTurn(session); err != nil {
-			c.cfg.Logger.Warn("opener turn failed", "error", err, "stream_sid", session.StreamSID)
-			return
+		if !isTapOnlySession(session) {
+			if err := brain.SendOpenerTurn(session); err != nil {
+				c.cfg.Logger.Warn("opener turn failed", "error", err, "stream_sid", session.StreamSID)
+				return
+			}
+			c.openerCount.Add(1)
 		}
-		c.openerCount.Add(1)
 	}
 
 	_ = tts

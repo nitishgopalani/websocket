@@ -599,8 +599,18 @@ func buildBorrowerContext(session *media.Session) *BorrowerContextPayload {
 	if amount := sessionParam(session, "amount_due", ""); amount != "" {
 		ctx.AmountDue = amount
 	}
+	if label := sessionParam(session, "speaker_label", ""); label != "" {
+		ctx.SpeakerLabel = label
+	}
+	if sessionParam(session, "tap_only", "") == "true" {
+		ctx.TapOnly = true
+	}
+	if parent := sessionParam(session, "parent_session_uuid", ""); parent != "" {
+		ctx.ParentSessionUUID = parent
+	}
 	if ctx.BorrowerName == "" && ctx.Phone == "" && ctx.AmountDue == nil &&
-		ctx.AccountRef == "" && ctx.Language == "" {
+		ctx.AccountRef == "" && ctx.Language == "" && ctx.SpeakerLabel == "" &&
+		!ctx.TapOnly && ctx.ParentSessionUUID == "" {
 		return nil
 	}
 	return ctx

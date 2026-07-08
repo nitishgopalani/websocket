@@ -23,6 +23,30 @@ func TestBuildBorrowerContextUsesCallSIDFallback(t *testing.T) {
 	}
 }
 
+func TestBuildBorrowerContextForwardsTapMeta(t *testing.T) {
+	session := &media.Session{
+		StreamSID: "tap-uuid",
+		Params: map[string]string{
+			"speaker_label":       "party-2",
+			"tap_only":            "true",
+			"parent_session_uuid": "parent-main",
+		},
+	}
+	ctx := buildBorrowerContext(session)
+	if ctx == nil {
+		t.Fatal("expected borrower context for tap session")
+	}
+	if ctx.SpeakerLabel != "party-2" {
+		t.Fatalf("speaker_label = %q", ctx.SpeakerLabel)
+	}
+	if !ctx.TapOnly {
+		t.Fatal("tap_only = false, want true")
+	}
+	if ctx.ParentSessionUUID != "parent-main" {
+		t.Fatalf("parent_session_uuid = %q", ctx.ParentSessionUUID)
+	}
+}
+
 func TestBuildBorrowerContextDerivesPhoneFromStreamSID(t *testing.T) {
 	session := &media.Session{
 		StreamSID: "73136989-60ad-abab-75e3-e69810587857",

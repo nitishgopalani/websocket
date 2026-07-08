@@ -29,11 +29,14 @@ const (
 
 // BorrowerContextPayload carries per-call campaign variables (Excel upload / metadata).
 type BorrowerContextPayload struct {
-	BorrowerName string  `json:"borrower_name,omitempty"`
-	Phone        string  `json:"phone,omitempty"`
-	AmountDue    any     `json:"amount_due,omitempty"`
-	AccountRef   string  `json:"account_ref,omitempty"`
-	Language     string  `json:"language,omitempty"`
+	BorrowerName      string `json:"borrower_name,omitempty"`
+	Phone             string `json:"phone,omitempty"`
+	AmountDue         any    `json:"amount_due,omitempty"`
+	AccountRef        string `json:"account_ref,omitempty"`
+	Language          string `json:"language,omitempty"`
+	SpeakerLabel      string `json:"speaker_label,omitempty"`
+	TapOnly           bool   `json:"tap_only,omitempty"`
+	ParentSessionUUID string `json:"parent_session_uuid,omitempty"`
 }
 
 // SessionStartPayload opens a persistent EB-6 session.
