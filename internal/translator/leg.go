@@ -41,8 +41,10 @@ type leg struct {
 	done     chan struct{}
 	closeOnce sync.Once
 
-	// lastPeerAudioAt is updated when the peer relays binary audio to this leg (B→A).
+	// lastPeerAudioAt suppresses comfort noise while the peer uplink or TTS is active.
 	lastPeerAudioAt atomic.Int64
+	// lastComfortNoiseAt paces one-way comfort noise to ~20ms cadence.
+	lastComfortNoiseAt atomic.Int64
 }
 
 func (s *leg) directionOut() string {
@@ -83,12 +85,16 @@ func (s *leg) writeLoop() {
 	}
 }
 
-// maybeInjectComfortNoise keeps line audio when the peer is quiet (no dead air).
+// maybeInjectComfortNoise keeps line audio when the peer is quiet (3b-i one-way only).
+// Bidirectional mode uses silence between TTS utterances — synthetic hiss was misheard as "chrrrr".
 func (s *leg) maybeInjectComfortNoise(now time.Time) {
 	if !s.paired.Load() || !s.server.cfg.TranslationEnabled {
 		return
 	}
-	if !s.server.cfg.Bidirectional && s.role != LegA {
+	if s.server.cfg.Bidirectional {
+		return
+	}
+	if s.role != LegA {
 		return
 	}
 	if !s.outbound.isEmpty() {
@@ -98,7 +104,19 @@ func (s *leg) maybeInjectComfortNoise(now time.Time) {
 	if last != 0 && now.Sub(time.Unix(0, last)) < 40*time.Millisecond {
 		return
 	}
+	prev := s.lastComfortNoiseAt.Load()
+	if prev != 0 && now.Sub(time.Unix(0, prev)) < 20*time.Millisecond {
+		return
+	}
+	s.lastComfortNoiseAt.Store(now.UnixNano())
 	s.outbound.enqueue(comfortNoisePCM(), now)
+}
+
+// notifyPeerUplink marks the peer leg while this leg's microphone is active (relay may be muted in 3b-ii).
+func (s *leg) notifyPeerUplink(at time.Time) {
+	if s.peer != nil {
+		s.peer.lastPeerAudioAt.Store(at.UnixNano())
+	}
 }
 
 func (s *leg) writeOne(req writeRequest) {
@@ -141,6 +159,8 @@ func (s *leg) enqueueBinaryPaced(payload []byte, playAt time.Time) {
 	if arrivedAt.IsZero() {
 		arrivedAt = time.Now()
 	}
+	// TTS playback keeps the line active — suppress comfort noise gaps on one-way leg A.
+	s.lastPeerAudioAt.Store(arrivedAt.UnixNano())
 	s.outbound.enqueueFrame(relayFrame{payload: payload, arrivedAt: arrivedAt, playAt: playAt})
 }
 
@@ -271,7 +291,8 @@ func (s *leg) readLoop(logger *slog.Logger) {
 				continue
 			}
 			arrived := time.Now()
-			if s.server.cfg.TranslationEnabled && s.paired.Load() && s.room != nil {
+			s.notifyPeerUplink(arrived)
+			if s.server.cfg.TranslationEnabled && s.room != nil {
 				if s.room.allowASRIngest(s.role) {
 					if lane := s.room.laneForSource(s.role); lane != nil {
 						_ = lane.ingestAudio(context.Background(), data)
