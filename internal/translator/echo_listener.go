@@ -20,6 +20,7 @@ type EchoListener struct {
 	logger     *slog.Logger
 	turnID     func() string
 	onTTSStart func()
+	onTranslationEmitted func()
 }
 
 // EchoListenerConfig wires the echo lane listener.
@@ -31,6 +32,7 @@ type EchoListenerConfig struct {
 	Logger     *slog.Logger
 	TurnID     func() string
 	OnTTSStart func()
+	OnTranslationEmitted func()
 }
 
 // NewEchoListener constructs the A→B echo listener.
@@ -50,6 +52,7 @@ func NewEchoListener(cfg EchoListenerConfig) *EchoListener {
 		logger:     cfg.Logger,
 		turnID:     cfg.TurnID,
 		onTTSStart: cfg.OnTTSStart,
+		onTranslationEmitted: cfg.OnTranslationEmitted,
 	}
 }
 
@@ -82,6 +85,9 @@ func (l *EchoListener) handleUtterance(ctx context.Context, session *media.Sessi
 	// Passthrough mark keeps latency buckets comparable (asr_final_to_mayura ≈ 0).
 	if l.latency != nil {
 		l.latency.MarkMayuraDone(turnID, time.Now(), text)
+	}
+	if l.onTranslationEmitted != nil {
+		l.onTranslationEmitted()
 	}
 	if l.onTTSStart != nil {
 		l.onTTSStart()

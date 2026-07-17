@@ -26,6 +26,7 @@ const (
 	defaultLoopBreakerWindowMS   = 10000
 	defaultTTSLanguageB          = "hi"
 	defaultTTSVoiceB             = "21m00Tcm4TlvDq8ikWAM"
+	defaultIncompleteExtraMS     = 300
 )
 
 // LaneMode selects translator lane behavior.
@@ -70,6 +71,8 @@ type Config struct {
 	LoopBreakerWindow     time.Duration
 	TTSLanguageB          string
 	TTSVoiceIDB           string
+	IncompleteExtraMs     int
+	FillerLexiconPath     string
 }
 
 // ConfigFromEnv loads configuration from environment variables.
@@ -99,6 +102,8 @@ func ConfigFromEnv() Config {
 		LoopBreakerWindow:     time.Duration(getenvInt("TRANSLATOR_LOOP_BREAKER_WINDOW_MS", defaultLoopBreakerWindowMS)) * time.Millisecond,
 		TTSLanguageB:          getenv("TRANSLATOR_TTS_LANGUAGE_B", defaultTTSLanguageB),
 		TTSVoiceIDB:           getenv("TRANSLATOR_TTS_VOICE_ID_B", defaultTTSVoiceB),
+		IncompleteExtraMs:     getenvInt("TRANSLATOR_INCOMPLETE_EXTRA_MS", defaultIncompleteExtraMS),
+		FillerLexiconPath:     os.Getenv("TRANSLATOR_FILLER_LEXICON"),
 	}
 	return cfg
 }

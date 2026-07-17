@@ -412,5 +412,7 @@ func BuildDepsFromEnv(logger *slog.Logger) (LaneDeps, error) {
 		LaneMode:          cfg.LaneMode,
 		ASRSampleRate:     cfg.ASRSampleRate,
 		TTSSynthRate:      cfg.TTSSynthRate,
+		IncompleteExtraMs: cfg.IncompleteExtraMs,
+		FillerLexiconPath: cfg.FillerLexiconPath,
 	}, nil
 }

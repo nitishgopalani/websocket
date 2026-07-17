@@ -48,6 +48,7 @@ type latencyBridge struct {
 	beginTurn      func() string
 	currentTurn    func() string
 	onSpeechStart  func()
+	onASRFinal     func()
 }
 
 func (b *latencyBridge) OnPartial(ctx context.Context, session *media.Session, transcript media.Transcript) {
@@ -55,6 +56,9 @@ func (b *latencyBridge) OnPartial(ctx context.Context, session *media.Session, t
 }
 
 func (b *latencyBridge) OnFinal(ctx context.Context, session *media.Session, transcript media.Transcript) {
+	if transcript.Text != "" && b.onASRFinal != nil {
+		b.onASRFinal()
+	}
 	if b.tracker != nil && b.currentTurn != nil {
 		if id := b.currentTurn(); id != "" {
 			b.tracker.MarkASRFinal(id, time.Now())
@@ -227,6 +231,8 @@ type LaneDeps struct {
 	LaneMode          LaneMode
 	ASRSampleRate     int
 	TTSSynthRate      int
+	IncompleteExtraMs int
+	FillerLexiconPath string
 }
 
 // LaneHooks wires room-level coordinator and loop-breaker callbacks.
@@ -254,6 +260,8 @@ type translationLane struct {
 	turnSeq     atomic.Uint64
 	pendingTurn atomic.Value
 	mode        LaneMode
+	audit       *TurnAudit
+	filler      *FillerLexicon
 
 	sourceLang string
 	targetLang string
@@ -379,6 +387,16 @@ func newTranslationLane(
 		lane.latency.MarkTTSFirstByte(turnID, time.Now())
 	}, deps.Logger)
 
+	lane.audit = NewTurnAudit(lane.direction.turnPrefix(), deps.Logger)
+	langBase := baseLang(sourceLang)
+	lane.filler = NewFillerLexicon(langBase, deps.FillerLexiconPath)
+
+	emitTranslation := func() {
+		if lane.audit != nil {
+			lane.audit.RecordTranslation()
+		}
+	}
+
 	switch lane.mode {
 	case LaneModeEcho:
 		lane.listener = NewEchoListener(EchoListenerConfig{
@@ -393,6 +411,7 @@ func newTranslationLane(
 					hook.OnTTSStarted(sourceRole)
 				}
 			},
+			OnTranslationEmitted: emitTranslation,
 		})
 	default:
 		lane.listener = NewTranslateListener(TranslateListenerConfig{
@@ -415,6 +434,7 @@ func newTranslationLane(
 					hook.OnTranslationDone(sourceRole, sourceText, translatedText)
 				}
 			},
+			OnTranslationEmitted: emitTranslation,
 		})
 	}
 
@@ -428,12 +448,38 @@ func newTranslationLane(
 		media.NoopBackchannel{},
 		deps.Logger,
 	)
+	incompleteExtra := deps.IncompleteExtraMs
+	if incompleteExtra <= 0 {
+		incompleteExtra = defaultIncompleteExtraMS
+	}
+	lane.turnManager.SetTurnPolicy(media.TurnPolicy{
+		CompletenessLang:  langBase,
+		IncompleteExtraMs: incompleteExtra,
+		FillerSuppress: func(text string) bool {
+			return lane.filler.IsPureFiller(langBase, text)
+		},
+		OnFillerSuppressed: func(text string) {
+			if lane.audit != nil {
+				lane.audit.RecordFillerSuppressed(text)
+			}
+		},
+		OnTurnMerged: func() {
+			if lane.audit != nil {
+				lane.audit.RecordMerged()
+			}
+		},
+	}, lane.filler.Words(langBase))
 
 	bridge := &latencyBridge{
 		inner:       lane.turnManager,
 		tracker:     lane.latency,
 		beginTurn:   lane.beginTurn,
 		currentTurn: lane.readTurnID,
+		onASRFinal: func() {
+			if lane.audit != nil {
+				lane.audit.RecordASRFinal()
+			}
+		},
 		onSpeechStart: func() {
 			if hook.OnSpeechStart != nil {
 				hook.OnSpeechStart(sourceRole)
@@ -491,6 +537,9 @@ func (l *translationLane) failOpenActive() bool {
 }
 
 func (l *translationLane) Close() error {
+	if l.audit != nil {
+		l.audit.VerifyAndLog()
+	}
 	if l.sink != nil && l.sourceSess != nil {
 		_ = l.sink.OnStop(context.Background(), l.sourceSess)
 	}

@@ -30,6 +30,7 @@ type TranslateListener struct {
 	targetSID         string
 	onTTSStart        func()
 	onTranslationDone func(sourceText, translatedText string)
+	onTranslationEmitted func()
 }
 
 // TranslateListenerConfig wires the one-direction listener.
@@ -45,6 +46,7 @@ type TranslateListenerConfig struct {
 	TargetSID         string
 	OnTTSStart        func()
 	OnTranslationDone func(sourceText, translatedText string)
+	OnTranslationEmitted func()
 }
 
 // NewTranslateListener constructs the A→B translation listener.
@@ -68,6 +70,7 @@ func NewTranslateListener(cfg TranslateListenerConfig) *TranslateListener {
 		targetSID:         cfg.TargetSID,
 		onTTSStart:        cfg.OnTTSStart,
 		onTranslationDone: cfg.OnTranslationDone,
+		onTranslationEmitted: cfg.OnTranslationEmitted,
 	}
 }
 
@@ -113,6 +116,9 @@ func (l *TranslateListener) handleUtterance(ctx context.Context, session *media.
 	}
 	if l.onTranslationDone != nil {
 		l.onTranslationDone(text, translated)
+	}
+	if l.onTranslationEmitted != nil {
+		l.onTranslationEmitted()
 	}
 
 	if l.onTTSStart != nil {

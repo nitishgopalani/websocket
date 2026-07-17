@@ -31,6 +31,8 @@ type TurnManager struct {
 
 	mu                     sync.Mutex
 	state                  turnState
+	policy                 TurnPolicy
+	fillerWords            []string
 	backchannelsSuppressed atomic.Int64
 }
 
@@ -195,6 +197,14 @@ func (m *TurnManager) ObserveAudio(ctx context.Context, session *Session, pcm16 
 	}
 }
 
+// SetTurnPolicy enables translator turn-boundary extensions (late finals, filler, adaptive endpoint).
+func (m *TurnManager) SetTurnPolicy(policy TurnPolicy, fillerWords []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.policy = policy
+	m.fillerWords = append([]string(nil), fillerWords...)
+}
+
 // SetListener replaces the downstream TurnListener (e.g. attach EB-6 brain client after construction).
 func (m *TurnManager) SetListener(next TurnListener) {
 	m.mu.Lock()
@@ -267,10 +277,33 @@ func (m *TurnManager) OnFinal(ctx context.Context, session *Session, transcript 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if transcript.Text != "" {
-		m.state.latestFinal = mergeASRTranscript(m.state.latestFinal, transcript.Text)
+	text := strings.TrimSpace(transcript.Text)
+	if text == "" {
+		if m.state.endSpeechSeen {
+			m.armEndpointTimerLocked(ctx, session)
+		}
+		return
 	}
-	if m.state.endSpeechSeen {
+
+	if m.state.turnEmitted {
+		if m.shouldSuppressFillerLocked(text) {
+			m.notifyFillerSuppressedLocked(text)
+			return
+		}
+		m.emitOrphanFinalLocked(ctx, session, text)
+		return
+	}
+
+	prev := m.state.latestFinal
+	merged := mergeASRTranscript(m.state.latestFinal, text)
+	if prev != "" && merged != prev {
+		if m.policy.OnTurnMerged != nil {
+			m.policy.OnTurnMerged()
+		}
+	}
+	m.state.latestFinal = merged
+
+	if m.state.endSpeechSeen || m.state.latestFinal != "" {
 		m.armEndpointTimerLocked(ctx, session)
 	}
 }
@@ -295,7 +328,7 @@ func (m *TurnManager) armEndpointTimerLocked(ctx context.Context, session *Sessi
 	if transcript == "" {
 		transcript = m.state.latestPartial
 	}
-	silence := m.cfg.SilenceForTranscript(m.state.flowClass, transcript)
+	silence := m.endpointDelayLocked(transcript)
 	if m.state.latestFinal == "" {
 		m.armSilenceTimerLocked(ctx, session, silence)
 		return
@@ -439,6 +472,58 @@ func (m *TurnManager) armMaxUtteranceTimerLocked(ctx context.Context, session *S
 	})
 }
 
+func (m *TurnManager) endpointDelayLocked(transcript string) time.Duration {
+	silence := m.cfg.SilenceForTranscript(m.state.flowClass, transcript)
+	lang := strings.TrimSpace(m.policy.CompletenessLang)
+	if lang != "" && m.policy.IncompleteExtraMs > 0 && transcript != "" {
+		if !TextIsComplete(transcript, lang, m.fillerWords...) {
+			silence += time.Duration(m.policy.IncompleteExtraMs) * time.Millisecond
+		}
+	}
+	return silence
+}
+
+func (m *TurnManager) shouldSuppressFillerLocked(text string) bool {
+	if m.policy.FillerSuppress == nil {
+		return false
+	}
+	return m.policy.FillerSuppress(text)
+}
+
+func (m *TurnManager) notifyFillerSuppressedLocked(text string) {
+	if m.policy.OnFillerSuppressed != nil {
+		m.policy.OnFillerSuppressed(text)
+	}
+	if m.logger != nil {
+		m.logger.Info("turn filler suppressed",
+			"text", text,
+		)
+	}
+}
+
+func (m *TurnManager) emitOrphanFinalLocked(ctx context.Context, session *Session, text string) {
+	m.stopSilenceTimerLocked()
+	m.stopSemanticCompleteTimerLocked()
+	m.stopLongSilenceFallbackTimerLocked()
+	m.stopMaxUtteranceTimerLocked()
+
+	m.state.turnEmitted = true
+	m.state.userSpeaking = false
+	m.state.semanticHold = false
+	m.state.latestFinal = text
+	m.state.latestPartial = ""
+
+	if m.timingHub != nil {
+		m.timingHub.BeginCallerTurn()
+	}
+	m.emitLocked(ctx, session, TurnEvent{
+		Kind:       TurnEndOfTurn,
+		Transcript: text,
+		FlowClass:  m.state.flowClass,
+		Forced:     false,
+	})
+}
+
 func (m *TurnManager) tryEmitEndOfTurn(ctx context.Context, session *Session, forced bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -454,6 +539,13 @@ func (m *TurnManager) tryEmitEndOfTurn(ctx context.Context, session *Session, fo
 		text = m.state.latestPartial
 	}
 	if text == "" {
+		return
+	}
+
+	if !forced && m.shouldSuppressFillerLocked(text) {
+		m.notifyFillerSuppressedLocked(text)
+		m.state.latestFinal = ""
+		m.state.latestPartial = ""
 		return
 	}
 
