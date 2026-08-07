@@ -109,6 +109,12 @@ func TestSarvamWSStream_AudioChunksArrive(t *testing.T) {
 		if cfg["speech_sample_rate"] != float64(8000) {
 			t.Errorf("config sample_rate = %v, want 8000", cfg["speech_sample_rate"])
 		}
+		if cfg["output_audio_codec"] != "linear16" {
+			t.Errorf("output_audio_codec = %v, want linear16", cfg["output_audio_codec"])
+		}
+		if _, ok := cfg["enable_preprocessing"]; ok {
+			t.Fatal("enable_preprocessing must not be sent for bulbul:v3 WS")
+		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for config")
 	}
@@ -164,6 +170,165 @@ loop:
 	}
 	if !hasFinal {
 		t.Error("no final chunk received")
+	}
+}
+
+func TestSarvamWSStream_ErrorFrameTriggersRESTFallbackAndAudio(t *testing.T) {
+	// F1: fake WS emits type:error after text → REST must synthesize; audio must egress (never silence).
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	wsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			_, data, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			var msg sarvamWSMessage
+			if err := json.Unmarshal(data, &msg); err != nil {
+				continue
+			}
+			switch msg.Type {
+			case "config":
+				// accept
+			case "text":
+				errFrame := map[string]any{
+					"type": "error",
+					"data": map[string]any{
+						"message": "Input parameters has to be a valid dictionary",
+						"code":    422,
+					},
+				}
+				payload, _ := json.Marshal(errFrame)
+				_ = conn.WriteMessage(websocket.TextMessage, payload)
+			}
+		}
+	}))
+	defer wsSrv.Close()
+
+	var restCalls atomic.Int32
+	restPCM := make([]byte, 640)
+	for i := range restPCM {
+		restPCM[i] = byte(i % 256)
+	}
+	restSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		restCalls.Add(1)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"audios": []string{base64.StdEncoding.EncodeToString(restPCM)},
+		})
+	}))
+	defer restSrv.Close()
+
+	cap := &warnCapture{}
+	provider := &SarvamTTSProvider{
+		apiKey:  "test-key",
+		baseURL: restSrv.URL,
+		model:   "bulbul:v3",
+		speaker: "amit",
+		lang:    "hi-IN",
+		client:  restSrv.Client(),
+		logger:  slog.New(cap),
+	}
+
+	wsURL := "ws" + strings.TrimPrefix(wsSrv.URL, "http")
+	ws := newSarvamTTSWSStream(provider, TTSSessionMeta{StreamSID: "err-fb", CallSID: "c1"}, 8000)
+	ws.wsURL = wsURL
+	ws.logger = slog.New(cap)
+
+	if err := ws.Open(context.Background()); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer ws.Close()
+
+	done := make(chan struct{})
+	var chunks []TTSAudioChunk
+	go func() {
+		defer close(done)
+		for c := range ws.Audio() {
+			chunks = append(chunks, c)
+		}
+	}()
+
+	if err := ws.Speak("turn-err", "नमस्ते"); err != nil {
+		t.Fatalf("Speak: %v", err)
+	}
+	_ = ws.Speak("turn-err", "") // flush
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if restCalls.Load() >= 1 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if restCalls.Load() == 0 {
+		t.Fatal("expected REST fallback after type:error frame")
+	}
+
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		hasAudio, hasFinal := false, false
+		for _, c := range chunks {
+			if len(c.MuLaw) > 0 {
+				hasAudio = true
+			}
+			if c.Final {
+				hasFinal = true
+			}
+		}
+		if hasAudio && hasFinal {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	hasAudio, hasFinal := false, false
+	for _, c := range chunks {
+		if len(c.MuLaw) > 0 {
+			hasAudio = true
+		}
+		if c.Final {
+			hasFinal = true
+		}
+	}
+	if !hasAudio {
+		t.Fatal("never-silence: expected audio chunks from REST fallback")
+	}
+	if !hasFinal {
+		t.Fatal("expected Final chunk after REST fallback")
+	}
+	if ws.Path() != "rest" {
+		t.Errorf("Path = %q, want rest", ws.Path())
+	}
+
+	cap.mu.Lock()
+	found := false
+	reasonOK := false
+	for i, msg := range cap.msgs {
+		if msg == "tts_ws_fallback" || strings.Contains(msg, "tts_ws_fallback") {
+			found = true
+			if a := cap.attrs[i]; a != nil {
+				if r, ok := a["reason"].(string); ok && strings.Contains(r, "valid dictionary") {
+					reasonOK = true
+				}
+			}
+		}
+	}
+	cap.mu.Unlock()
+	if !found {
+		t.Error("expected WARN tts_ws_fallback")
+	}
+	if !reasonOK {
+		t.Error("expected tts_ws_fallback reason to include error message")
+	}
+
+	_ = ws.Close()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
 	}
 }
 
@@ -603,8 +768,8 @@ func TestSarvamTTSPaceFromEnv(t *testing.T) {
 
 func TestSarvamTTSStreamingEnabled(t *testing.T) {
 	t.Setenv("SARVAM_TTS_STREAMING", "")
-	if !SarvamTTSStreamingEnabled() {
-		t.Error("default should be enabled")
+	if SarvamTTSStreamingEnabled() {
+		t.Error("default should be disabled (REST primary until WS proven)")
 	}
 
 	t.Setenv("SARVAM_TTS_STREAMING", "false")

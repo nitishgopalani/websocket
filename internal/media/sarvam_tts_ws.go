@@ -51,11 +51,29 @@ type sarvamWSEventResponse struct {
 }
 
 // sarvamWSErrorResponse is an error from Sarvam WS.
+// AsyncAPI nests fields under data; some SDKs also emit top-level message.
 type sarvamWSErrorResponse struct {
 	Type    string `json:"type"`
 	Message string `json:"message"`
 	Error   string `json:"error"`
+	Data    struct {
+		Message   string `json:"message"`
+		Code      int    `json:"code"`
+		RequestID string `json:"request_id"`
+	} `json:"data"`
 }
+
+func (e sarvamWSErrorResponse) message() string {
+	if m := strings.TrimSpace(e.Data.Message); m != "" {
+		return m
+	}
+	if m := strings.TrimSpace(e.Message); m != "" {
+		return m
+	}
+	return strings.TrimSpace(e.Error)
+}
+
+func (e sarvamWSErrorResponse) code() int { return e.Data.Code }
 
 // sarvamWSConfig holds per-connection config for Sarvam TTS WS.
 type sarvamWSConfig struct {
@@ -103,10 +121,11 @@ type sarvamTTSWSStream struct {
 	done  chan struct{}
 	wg    sync.WaitGroup
 
-	wsPath        string
-	wsFallbacks   atomic.Int64
-	wsReconnects  atomic.Int64
-	restFallbacks atomic.Int64
+	wsPath           string
+	wsFallbacks      atomic.Int64
+	wsReconnects     atomic.Int64
+	restFallbacks    atomic.Int64
+	loggedErrorTypes map[string]bool // D1: one raw-frame log per distinct error text
 
 	logger *slog.Logger
 }
@@ -114,19 +133,19 @@ type sarvamTTSWSStream struct {
 // sarvamSynthesisState tracks in-flight synthesis for a single turn.
 type sarvamSynthesisState struct {
 	turnID       string
+	text         string // accumulated Speak text for REST fallback
 	textSent     bool
 	audioStarted bool
 	finalSent    bool
 	cancelled    bool
+	fallingBack  bool
 	doneCh       chan struct{}
 }
 
 // SarvamTTSStreamingEnabled returns true if WebSocket TTS is enabled.
+// Default false — REST stays primary until WS is proven on UAT.
 func SarvamTTSStreamingEnabled() bool {
 	v := strings.ToLower(strings.TrimSpace(os.Getenv("SARVAM_TTS_STREAMING")))
-	if v == "" {
-		return true // default enabled
-	}
 	return v == "1" || v == "true" || v == "yes"
 }
 
@@ -249,15 +268,17 @@ func (s *sarvamTTSWSStream) sendConfig(cfg sarvamWSConfig) error {
 	}
 
 	data := map[string]any{
-		"target_language_code":  cfg.language,
-		"speaker":               cfg.speaker,
-		"speech_sample_rate":    cfg.sampleRate,
-		"enable_preprocessing":  true,
-		"output_audio_codec":    "linear_pcm",
+		"target_language_code": cfg.language,
+		"speaker":              cfg.speaker,
+		// linear16 @ session rate → raw PCM16 (D1.5: mulaw/alaw/wav/mp3 also OK;
+		// linear_pcm is INVALID and returns 422).
+		"speech_sample_rate": cfg.sampleRate,
+		"output_audio_codec": "linear16",
 	}
 	if cfg.model != "" {
 		data["model"] = cfg.model
 	}
+	// bulbul:v3: preprocessing is always on — do not send enable_preprocessing.
 	if cfg.pace != nil {
 		p := *cfg.pace
 		if isSarvamBulbulV3(cfg.model) {
@@ -346,14 +367,17 @@ func (s *sarvamTTSWSStream) Speak(turnID string, text string) error {
 		return s.flushAndWait(turnID, state)
 	}
 
+	s.mu.Lock()
+	if state.text != "" {
+		state.text = state.text + " " + text
+	} else {
+		state.text = text
+	}
+	s.mu.Unlock()
+
 	cfg := s.resolveConfig(turnID)
 	if err := s.ensureConnection(context.Background(), cfg); err != nil {
-		s.logger.Warn("sarvam ws connection failed, falling back to REST",
-			"stream_sid", s.meta.StreamSID,
-			"turn_id", turnID,
-			"error", err,
-		)
-		return s.speakREST(turnID, text, cfg)
+		return s.speakREST(turnID, text, cfg, "handshake: "+err.Error())
 	}
 
 	if err := s.sendText(turnID, text); err != nil {
@@ -363,15 +387,10 @@ func (s *sarvamTTSWSStream) Speak(turnID string, text string) error {
 			"error", err,
 		)
 		if err := s.reconnectOnce(context.Background(), cfg); err != nil {
-			s.logger.Warn("sarvam ws reconnect failed, falling back to REST",
-				"stream_sid", s.meta.StreamSID,
-				"turn_id", turnID,
-				"error", err,
-			)
-			return s.speakREST(turnID, text, cfg)
+			return s.speakREST(turnID, text, cfg, "reconnect: "+err.Error())
 		}
 		if err := s.sendText(turnID, text); err != nil {
-			return s.speakREST(turnID, text, cfg)
+			return s.speakREST(turnID, text, cfg, "send: "+err.Error())
 		}
 	}
 
@@ -493,19 +512,31 @@ func (s *sarvamTTSWSStream) sendPing() error {
 }
 
 // speakREST falls back to REST synthesis, marking the fallback path.
-func (s *sarvamTTSWSStream) speakREST(turnID, text string, cfg sarvamWSConfig) error {
+func (s *sarvamTTSWSStream) speakREST(turnID, text string, cfg sarvamWSConfig, reason string) error {
 	s.wsFallbacks.Add(1)
 	s.restFallbacks.Add(1)
 	s.mu.Lock()
 	s.wsPath = "rest"
+	if st := s.inFlight[turnID]; st != nil {
+		st.fallingBack = true
+		if text == "" && st.text != "" {
+			text = st.text
+		}
+	}
 	s.mu.Unlock()
 
 	s.logger.Warn("tts_ws_fallback",
 		"stream_sid", s.meta.StreamSID,
 		"turn_id", turnID,
+		"reason", reason,
 		"speaker", cfg.speaker,
 		"model", cfg.model,
 	)
+
+	if strings.TrimSpace(text) == "" {
+		s.emitFinal(turnID)
+		return nil
+	}
 
 	restStream := &sarvamTTSStream{
 		provider:   s.provider,
@@ -522,8 +553,37 @@ func (s *sarvamTTSWSStream) speakREST(turnID, text string, cfg sarvamWSConfig) e
 	go func() {
 		defer s.wg.Done()
 		restStream.synthesize(turnID, text, cfg.speaker, cfg.model, cfg.pace)
+		s.mu.Lock()
+		if st := s.inFlight[turnID]; st != nil {
+			st.finalSent = true
+			delete(s.inFlight, turnID)
+		}
+		s.mu.Unlock()
+		s.emitFinal(turnID)
 	}()
 	return nil
+}
+
+// fallbackTurnOnWSError triggers per-turn REST when Sarvam sends type:error (F1).
+func (s *sarvamTTSWSStream) fallbackTurnOnWSError(reason string) {
+	s.mu.Lock()
+	var turnID, text string
+	for tid, st := range s.inFlight {
+		if st.finalSent || st.fallingBack || st.cancelled {
+			continue
+		}
+		turnID = tid
+		text = st.text
+		st.fallingBack = true
+		break
+	}
+	s.mu.Unlock()
+	if turnID == "" {
+		// Config-time error before any Speak — nothing to synthesize yet.
+		return
+	}
+	cfg := s.resolveConfig(turnID)
+	_ = s.speakREST(turnID, text, cfg, reason)
 }
 
 func (s *sarvamTTSWSStream) readLoop() {
@@ -597,9 +657,15 @@ func (s *sarvamTTSWSStream) handleInbound(data []byte) {
 	case "error":
 		var resp sarvamWSErrorResponse
 		if err := json.Unmarshal(data, &resp); err != nil {
+			s.logger.Warn("sarvam ws error unmarshal failed",
+				"stream_sid", s.meta.StreamSID,
+				"raw", string(data),
+				"error", err,
+			)
 			return
 		}
-		s.handleError(resp)
+		msg := s.handleErrorRaw(data, resp)
+		s.fallbackTurnOnWSError(msg)
 	}
 }
 
@@ -613,15 +679,30 @@ func (s *sarvamTTSWSStream) handleAudio(resp sarvamWSAudioResponse) {
 		return
 	}
 
+	ct := strings.ToLower(resp.Data.ContentType)
 	pcm := raw
-	if strings.Contains(strings.ToLower(resp.Data.ContentType), "wav") {
-		pcm, _ = wavParsePCM16(raw)
+	switch {
+	case strings.Contains(ct, "wav"):
+		if decoded, _ := wavParsePCM16(raw); len(decoded) > 0 {
+			pcm = decoded
+		}
+	case strings.Contains(ct, "mulaw") || strings.Contains(ct, "pcmu"):
+		pcm = MuLawToPCM16(raw)
+	case strings.Contains(ct, "mpeg") || strings.Contains(ct, "mp3"):
+		s.logger.Warn("sarvam ws unexpected mp3 chunk; falling back to REST",
+			"stream_sid", s.meta.StreamSID,
+			"content_type", resp.Data.ContentType,
+		)
+		s.fallbackTurnOnWSError("unexpected mp3 content_type on ws")
+		return
+	default:
+		// audio/pcm, audio/raw, linear16 — PCM16 LE passthrough
 	}
 
 	s.mu.Lock()
 	var turnID string
 	for tid, state := range s.inFlight {
-		if !state.finalSent && state.textSent {
+		if !state.finalSent && state.textSent && !state.fallingBack {
 			turnID = tid
 			state.audioStarted = true
 			break
@@ -635,6 +716,10 @@ func (s *sarvamTTSWSStream) handleAudio(resp sarvamWSAudioResponse) {
 		s.mu.Unlock()
 		return
 	}
+	if st := s.inFlight[turnID]; st != nil && st.fallingBack {
+		s.mu.Unlock()
+		return
+	}
 	s.mu.Unlock()
 
 	s.emitPCM(turnID, pcm)
@@ -644,13 +729,14 @@ func (s *sarvamTTSWSStream) handleFinal() {
 	s.mu.Lock()
 	var turnID string
 	for tid, state := range s.inFlight {
-		if !state.finalSent && state.textSent {
-			turnID = tid
-			state.finalSent = true
-			close(state.doneCh)
-			delete(s.inFlight, tid)
-			break
+		if state.fallingBack || state.finalSent || !state.textSent {
+			continue
 		}
+		turnID = tid
+		state.finalSent = true
+		close(state.doneCh)
+		delete(s.inFlight, tid)
+		break
 	}
 	s.mu.Unlock()
 
@@ -660,14 +746,43 @@ func (s *sarvamTTSWSStream) handleFinal() {
 }
 
 func (s *sarvamTTSWSStream) handleError(resp sarvamWSErrorResponse) {
-	msg := resp.Message
-	if msg == "" {
-		msg = resp.Error
-	}
+	msg := resp.message()
+	code := resp.code()
 	s.logger.Warn("sarvam ws error",
 		"stream_sid", s.meta.StreamSID,
 		"error", msg,
+		"code", code,
+		"request_id", resp.Data.RequestID,
 	)
+}
+
+// handleErrorRaw logs the complete raw error frame once per distinct message
+// (D1 visibility) and returns the parsed message for fallback.
+func (s *sarvamTTSWSStream) handleErrorRaw(raw []byte, resp sarvamWSErrorResponse) string {
+	msg := resp.message()
+	key := msg
+	if key == "" {
+		key = string(raw)
+	}
+	s.mu.Lock()
+	if s.loggedErrorTypes == nil {
+		s.loggedErrorTypes = make(map[string]bool)
+	}
+	already := s.loggedErrorTypes[key]
+	if !already {
+		s.loggedErrorTypes[key] = true
+	}
+	s.mu.Unlock()
+	if !already {
+		s.logger.Warn("sarvam ws error raw frame",
+			"stream_sid", s.meta.StreamSID,
+			"error", msg,
+			"code", resp.code(),
+			"raw", string(raw),
+		)
+	}
+	s.handleError(resp)
+	return msg
 }
 
 func (s *sarvamTTSWSStream) keepaliveLoop() {
