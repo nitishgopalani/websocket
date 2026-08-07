@@ -19,12 +19,46 @@ import (
 
 const (
 	defaultSarvamTTSBaseURL = "https://api.sarvam.ai"
-	defaultSarvamTTSModel   = "bulbul:v2"
-	defaultSarvamTTSSpeaker = "abhilash" // deep, authoritative male Hindi voice (bulbul:v2)
+	defaultSarvamTTSModel   = "bulbul:v3"
+	defaultSarvamTTSSpeaker = "amit" // v3-primary default (abhilash is v2-only)
+	defaultSarvamTTSV2Model = "bulbul:v2"
 	defaultSarvamTTSLang    = "hi-IN"
 	sarvamTTSMaxChars       = 1400 // per-request text cap; replies are short, split if longer
 	sarvamTTSEmitChunkBytes = 4096 // ~128ms of PCM16@16k per emitted chunk
 )
+
+// fallbackSpeakerV2 remaps bulbul:v3 speakers to bulbul:v2 catalog on retry.
+// Unknown speakers fall through to FallbackSpeakerV2Default.
+var fallbackSpeakerV2 = map[string]string{
+	"priya": "anushka",
+	"neha":  "manisha",
+	"kabir": "hitesh",
+	"amit":  "karun",
+}
+
+const FallbackSpeakerV2Default = "abhilash"
+
+// RemapSpeakerV2 returns the bulbul:v2 speaker for a v3 (or unknown) name.
+func RemapSpeakerV2(speaker string) string {
+	key := strings.ToLower(strings.TrimSpace(speaker))
+	if v, ok := fallbackSpeakerV2[key]; ok {
+		return v
+	}
+	return FallbackSpeakerV2Default
+}
+
+// shouldFallbackV3ToV2 is true when a bulbul:v3 attempt hit a retryable failure.
+func shouldFallbackV3ToV2(model string, status int, transportErr error) bool {
+	if !isSarvamBulbulV3(model) {
+		return false
+	}
+	if transportErr != nil {
+		return true
+	}
+	return status == http.StatusBadRequest ||
+		status == http.StatusTooManyRequests ||
+		status >= 500
+}
 
 // sarvamTTSConfigFromEnv populates a Sarvam-flavoured TTSConfig. APIKey reuses the
 // same SARVAM_API_KEY already used for ASR; speaker/model/language are overridable.
@@ -328,6 +362,61 @@ type sarvamTTSResponse struct {
 }
 
 func (s *sarvamTTSStream) requestPCM(text, speaker, model string, pace *float64) ([]byte, error) {
+	pcm, status, errBody, transportErr := s.doSarvamTTS(text, speaker, model, pace)
+	if pcm != nil {
+		return pcm, nil
+	}
+	v3Err := transportErr
+	if v3Err == nil {
+		v3Err = fmt.Errorf("sarvam tts http %d: %s", status, strings.TrimSpace(errBody))
+	}
+	if !shouldFallbackV3ToV2(model, status, transportErr) {
+		return nil, v3Err
+	}
+
+	fbSpeaker := RemapSpeakerV2(speaker)
+	fbModel := defaultSarvamTTSV2Model
+	callID := s.meta.CallSID
+	if callID == "" {
+		callID = s.meta.StreamSID
+	}
+	s.provider.logger.Warn("sarvam tts v3→v2 fallback",
+		"call_id", callID,
+		"stream_sid", s.meta.StreamSID,
+		"original_speaker", speaker,
+		"original_model", model,
+		"fallback_speaker", fbSpeaker,
+		"fallback_model", fbModel,
+		"v3_http_status", status,
+		"v3_error", strings.TrimSpace(errBody),
+		"v3_transport_error", errString(transportErr),
+	)
+
+	pcm, status2, errBody2, transportErr2 := s.doSarvamTTS(text, fbSpeaker, fbModel, pace)
+	if pcm != nil {
+		return pcm, nil
+	}
+	if transportErr2 != nil {
+		return nil, fmt.Errorf("sarvam tts v2 fallback failed after v3 error (%v): %w", v3Err, transportErr2)
+	}
+	return nil, fmt.Errorf(
+		"sarvam tts v2 fallback failed after v3 error (%v): http %d: %s",
+		v3Err, status2, strings.TrimSpace(errBody2),
+	)
+}
+
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+// doSarvamTTS performs one REST synthesis. On non-200, returns status + body and a nil pcm.
+// Transport failures return transportErr with status 0.
+func (s *sarvamTTSStream) doSarvamTTS(
+	text, speaker, model string, pace *float64,
+) (pcm []byte, status int, errBody string, transportErr error) {
 	var body []byte
 	var err error
 	if pace != nil {
@@ -342,29 +431,28 @@ func (s *sarvamTTSStream) requestPCM(text, speaker, model string, pace *float64)
 		))
 	}
 	if err != nil {
-		return nil, err
+		return nil, 0, "", err
 	}
 	req, err := http.NewRequest(http.MethodPost, s.provider.baseURL+"/text-to-speech", bytes.NewReader(body))
 	if err != nil {
-		return nil, err
+		return nil, 0, "", err
 	}
 	req.Header.Set("api-subscription-key", s.provider.apiKey)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := s.provider.client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, 0, "", err
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("sarvam tts http %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+		return nil, resp.StatusCode, string(raw), nil
 	}
 	var parsed sarvamTTSResponse
 	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return nil, fmt.Errorf("sarvam tts decode: %w", err)
+		return nil, resp.StatusCode, string(raw), fmt.Errorf("sarvam tts decode: %w", err)
 	}
-	var pcm []byte
 	for _, b64 := range parsed.Audios {
 		wav, err := base64.StdEncoding.DecodeString(b64)
 		if err != nil {
@@ -377,16 +465,16 @@ func (s *sarvamTTSStream) requestPCM(text, speaker, model string, pace *float64)
 		if wavRate != s.sampleRate {
 			resampled, err := ResamplePCM16Linear(pcmPart, wavRate, s.sampleRate)
 			if err != nil {
-				return nil, fmt.Errorf("sarvam tts resample %d->%d: %w", wavRate, s.sampleRate, err)
+				return nil, resp.StatusCode, "", fmt.Errorf("sarvam tts resample %d->%d: %w", wavRate, s.sampleRate, err)
 			}
 			pcmPart = resampled
 		}
 		pcm = append(pcm, pcmPart...)
 	}
 	if len(pcm) == 0 {
-		return nil, fmt.Errorf("sarvam tts returned no audio")
+		return nil, resp.StatusCode, string(raw), fmt.Errorf("sarvam tts returned no audio")
 	}
-	return pcm, nil
+	return pcm, resp.StatusCode, "", nil
 }
 
 // emitPCM chunks PCM16 bytes onto the audio channel. Returns false if cancelled/closed.
