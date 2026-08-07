@@ -53,6 +53,12 @@ type DeferredPlaybackEgress interface {
 	DefersPlaybackComplete() bool
 }
 
+// pendingFrame is one paced egress media frame tagged with its TTS turn.
+type pendingFrame struct {
+	turnID string
+	data   []byte
+}
+
 // CarrierEgress implements AudioEgress: paced carrier media, mark checkpoints, and clear for barge-in.
 type CarrierEgress struct {
 	cfg        EgressConfig
@@ -67,7 +73,7 @@ type CarrierEgress struct {
 
 	mu             sync.Mutex
 	session        *Session
-	pendingFrames  [][]byte
+	pendingFrames  []pendingFrame
 	pendingMark    string
 	framesSent     int
 	playbackStart  time.Time
@@ -251,7 +257,29 @@ func (e *CarrierEgress) SendAudio(_ context.Context, session *Session, chunk TTS
 	}
 	frames := splitMuLawFrames(chunk.MuLaw, e.frameBytes)
 	e.mu.Lock()
-	e.pendingFrames = append(e.pendingFrames, frames...)
+	// Newer turn's first chunk supersedes prior turn: drop remaining old frames.
+	if chunk.TurnID != "" && e.activeTurnID != "" && chunk.TurnID != e.activeTurnID {
+		prior := e.activeTurnID
+		dropped := len(e.pendingFrames)
+		e.pendingFrames = nil
+		if e.pendingMark != "" && e.pendingMark != chunk.TurnID {
+			e.pendingMark = ""
+		}
+		if dropped > 0 {
+			atomic.AddInt64(&e.pendingDropped, int64(dropped))
+			if e.logger != nil {
+				e.logger.Info("egress turn superseded; dropped prior frames",
+					"stream_sid", session.StreamSID,
+					"prior_turn_id", prior,
+					"new_turn_id", chunk.TurnID,
+					"dropped_frames", dropped,
+				)
+			}
+		}
+	}
+	for _, fr := range frames {
+		e.pendingFrames = append(e.pendingFrames, pendingFrame{turnID: chunk.TurnID, data: fr})
+	}
 	e.activeTurnID = chunk.TurnID
 	e.mu.Unlock()
 	return nil
@@ -269,6 +297,7 @@ func (e *CarrierEgress) ClearPlayback(_ context.Context, session *Session) error
 	dropped := len(e.pendingFrames)
 	e.pendingFrames = nil
 	e.pendingMark = ""
+	e.activeTurnID = ""
 	e.framesSent = 0
 	e.playbackStart = e.clock.Now()
 	e.paused = false
@@ -279,11 +308,15 @@ func (e *CarrierEgress) ClearPlayback(_ context.Context, session *Session) error
 	if session == nil {
 		return nil
 	}
+	// Asterisk/Dinesh: BargeInFlushSupported=false — AsteriskSerializer.Clear is a
+	// no-op seam. Residual: frames already written to the AudioSocket/WS edge may
+	// still play until the carrier drains; local pending is dropped immediately.
 	if !e.profile.BargeInFlushSupported {
 		if e.logger != nil {
 			e.logger.Warn("barge-in: no carrier flush; buffered audio may still play on Asterisk edge",
 				"stream_sid", session.StreamSID,
 				"BARGEIN_FLUSH_SUPPORTED", false,
+				"residual", "asterisk_edge_buffer_uncleared",
 			)
 		}
 		return nil
@@ -376,7 +409,7 @@ func (e *CarrierEgress) onTick() {
 		}
 		e.mu.Unlock()
 
-		e.enqueueMediaFrame(session, frame)
+		e.enqueueMediaFrame(session, frame.data)
 		e.markEgressFirstFrame(session.StreamSID)
 		if markTurn != "" {
 			e.completePlaybackMark(session, markTurn)
@@ -426,7 +459,7 @@ func (e *CarrierEgress) drainBurst() {
 		e.framesSent++
 		e.mu.Unlock()
 
-		e.enqueueMediaFrame(session, frame)
+		e.enqueueMediaFrame(session, frame.data)
 		e.markEgressFirstFrame(session.StreamSID)
 	}
 }

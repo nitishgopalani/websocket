@@ -82,10 +82,15 @@ func NewASRSink(provider ASRProvider, consumer TranscriptConsumer, sampleRate in
 }
 
 func (s *ASRSink) OnStart(ctx context.Context, session *Session) error {
+	// Prefer per-session wire rate from session_start (e.g. g711=8000) over process TARGET.
+	rate := s.sampleRate
+	if session != nil && session.Format.SampleRate > 0 {
+		rate = session.Format.SampleRate
+	}
 	meta := ASRSessionMeta{
 		StreamSID:  session.StreamSID,
 		CallSID:    session.CallSID,
-		SampleRate: s.sampleRate,
+		SampleRate: rate,
 		Params:     session.Params,
 	}
 	lang := ResolveSessionASRLanguage(session.Params, s.logger, session.StreamSID)

@@ -1,6 +1,9 @@
 package media
 
-import "testing"
+import (
+	"log/slog"
+	"testing"
+)
 
 func TestNormalizeSarvamLanguage(t *testing.T) {
 	tests := []struct {
@@ -36,12 +39,21 @@ func TestOutputSampleRateFromParams(t *testing.T) {
 }
 
 func TestElevenLabsPCMFormatForRate(t *testing.T) {
+	if got := ElevenLabsPCMFormatForRate(8000); got != "pcm_8000" {
+		t.Fatalf("8000: got %q, want pcm_8000", got)
+	}
 	if got := ElevenLabsPCMFormatForRate(16000); got != "pcm_16000" {
-		t.Fatalf("got %q", got)
+		t.Fatalf("16000: got %q", got)
 	}
 	if got := ElevenLabsPCMFormatForRate(24000); got != "pcm_24000" {
-		t.Fatalf("got %q", got)
+		t.Fatalf("24000: got %q", got)
 	}
+}
+
+func TestLogSessionAudioRates_noPanic(t *testing.T) {
+	LogSessionAudioRates(slog.Default(), "sid", 8000, 16000, 8000)
+	LogSessionAudioRates(slog.Default(), "sid", 8000, 8000, 8000)
+	LogSessionAudioRates(nil, "sid", 8000, 8000, 8000)
 }
 
 func TestResamplePCM16Linear24to16(t *testing.T) {

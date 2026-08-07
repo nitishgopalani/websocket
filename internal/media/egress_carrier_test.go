@@ -1,6 +1,7 @@
 package media
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -206,6 +207,46 @@ func TestCarrierEgressSendAudioMediaFraming(t *testing.T) {
 	}
 	if string(combined) != string(audio) {
 		t.Fatalf("combined payload mismatch")
+	}
+}
+
+func TestCarrierEgressSupersedeDropsPriorTurn(t *testing.T) {
+	// Overlapping t6/t7: after t7's first chunk, only t7 frames may egress.
+	clock := NewFakeClock(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+	egress, session, cap := setupCarrierEgressTest(t, clock)
+
+	t6 := bytes.Repeat([]byte{0x01}, 160*8) // 8 frames
+	t7 := bytes.Repeat([]byte{0x02}, 160*3) // 3 frames
+	if err := egress.SendAudio(context.Background(), session, TTSAudioChunk{TurnID: "t6", MuLaw: t6}); err != nil {
+		t.Fatal(err)
+	}
+	if err := egress.SendAudio(context.Background(), session, TTSAudioChunk{TurnID: "t7", MuLaw: t7}); err != nil {
+		t.Fatal(err)
+	}
+	if got := egress.PendingDropped(); got < 8 {
+		t.Fatalf("pending dropped = %d, want >= 8 (all t6 frames)", got)
+	}
+
+	for i := 0; i < 5; i++ {
+		clock.Advance(20 * time.Millisecond)
+	}
+	waitCapture(t, cap, 3, time.Second)
+	msgs := cap.snapshot()
+	media := 0
+	for _, msg := range msgs {
+		if !isMediaOutbound(msg.data) {
+			continue
+		}
+		media++
+		_, payload := parseOutboundMedia(t, msg.data)
+		for _, b := range payload {
+			if b != 0x02 {
+				t.Fatalf("egress still contains prior-turn bytes after supersede")
+			}
+		}
+	}
+	if media != 3 {
+		t.Fatalf("media frames = %d, want 3 (t7 only)", media)
 	}
 }
 

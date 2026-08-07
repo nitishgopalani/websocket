@@ -137,7 +137,10 @@ func NewSarvamTTSProvider(cfg TTSConfig) (*SarvamTTSProvider, error) {
 }
 
 func (p *SarvamTTSProvider) Open(_ context.Context, meta TTSSessionMeta) (TTSStream, error) {
-	rate := SampleRateFromPCMFormat(meta.OutputFormat)
+	rate := meta.OutputSampleRate
+	if rate <= 0 {
+		rate = SampleRateFromPCMFormat(meta.OutputFormat)
+	}
 	sampleRate := sarvamSupportedRate(rate)
 	s := &sarvamTTSStream{
 		provider:   p,

@@ -7,6 +7,27 @@ import (
 	"strings"
 )
 
+// LogSessionAudioRates emits one line per call with session/sarvam/asr rates.
+// WARNs when any mismatch survives so diagnosis is immediate.
+func LogSessionAudioRates(logger *slog.Logger, streamSID string, sessionRate, sarvamRate, asrRate int) {
+	if logger == nil {
+		return
+	}
+	mismatch := sessionRate > 0 && sarvamRate > 0 && asrRate > 0 &&
+		(sessionRate != sarvamRate || sessionRate != asrRate || sarvamRate != asrRate)
+	attrs := []any{
+		"stream_sid", streamSID,
+		"session_rate", sessionRate,
+		"sarvam_rate", sarvamRate,
+		"asr_rate", asrRate,
+	}
+	if mismatch {
+		logger.Warn("audio rate mismatch", attrs...)
+		return
+	}
+	logger.Info("audio rates", attrs...)
+}
+
 // OutputSampleRateFromParams reads Dinesh session_start output_sample_rate (default 0 = use carrier default).
 func OutputSampleRateFromParams(params map[string]string) int {
 	if params == nil {
@@ -22,11 +43,14 @@ func OutputSampleRateFromParams(params map[string]string) int {
 	return 0
 }
 
-// ElevenLabsPCMFormatForRate picks the closest ElevenLabs streaming PCM format for a target Hz.
+// ElevenLabsPCMFormatForRate picks the closest streaming PCM format for a target Hz.
+// 8 kHz sessions stay on pcm_8000 (G.711 / Asterisk slin) — do not snap up to 16 kHz.
 func ElevenLabsPCMFormatForRate(hz int) string {
 	switch {
 	case hz <= 0:
 		return "pcm_24000"
+	case hz <= 8000:
+		return "pcm_8000"
 	case hz <= 16000:
 		return "pcm_16000"
 	case hz <= 22050:
@@ -79,6 +103,11 @@ func OpenSessionTTSStream(
 		OutputSampleRate: targetRate,
 		OutputFormat:     format,
 	}
+	asrRate := session.Format.SampleRate
+	if asrRate <= 0 {
+		asrRate = targetRate
+	}
+	LogSessionAudioRates(logger, session.StreamSID, targetRate, sourceRate, asrRate)
 	if logger != nil {
 		logger.Info("tts session output rate",
 			"stream_sid", session.StreamSID,
