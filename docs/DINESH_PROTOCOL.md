@@ -66,14 +66,20 @@ Exotel/Fonada use `mark` echo to know when playback finished. This protocol has 
 
 ## Barge-in gap
 
-There is **no flush/clear** command on this protocol.
+**Channel interface:** binary AudioSocket-style WebSocket (Dinesh `session_start` + BINARY
+PCM frames). Not ARI. `AsteriskSerializer.Clear` is a no-op seam.
+
+There is **no flush/clear** command on this protocol (`BargeInFlushSupported=false`).
 
 On barge-in commit we:
 
 1. Pause/stop sending new binary frames from our egress pacer
-2. Cancel in-flight TTS and brain turn (CT-11)
+2. Cancel in-flight TTS and brain turn (CT-11); drop local pending frames
 3. Log a **WARN**: buffered audio already sent to Dinesh's edge may still play
-   (`BARGEIN_FLUSH_SUPPORTED=false`)
+   (`BARGEIN_FLUSH_SUPPORTED=false`, `residual=asterisk_edge_buffer_uncleared`)
+
+**Residual depth:** max stale edge tail ≈ `EGRESS_JITTER_MS` send-ahead (default **200ms**).
+Already-written frames cannot be recalled without a carrier flush primitive.
 
 **Open question for Dinesh:** Is there an interrupt/flush control frame we should send when the
 caller barges in? A seam exists in `AsteriskSerializer.Clear` (currently no-op) to add one later.

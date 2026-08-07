@@ -255,6 +255,14 @@ func (c *cachingTTSStream) Cancel(turnID string) error {
 	return c.inner.Cancel(turnID)
 }
 
+// Path forwards the inner TTS path label (ws/rest) through the cache wrapper.
+func (c *cachingTTSStream) Path() string {
+	if p, ok := c.inner.(interface{ Path() string }); ok {
+		return p.Path()
+	}
+	return ""
+}
+
 func (c *cachingTTSStream) Audio() <-chan TTSAudioChunk { return c.out }
 
 func (c *cachingTTSStream) Close() error {

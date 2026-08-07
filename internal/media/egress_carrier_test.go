@@ -250,6 +250,45 @@ func TestCarrierEgressSupersedeDropsPriorTurn(t *testing.T) {
 	}
 }
 
+func TestCarrierEgressStickyWatermarkInterleavedT4T5(t *testing.T) {
+	// Call 44f43121 ordering after t5 starts: t5, t4, t5 — zero t4 egress, no thrash.
+	clock := NewFakeClock(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+	egress, session, cap := setupCarrierEgressTest(t, clock)
+
+	frame := func(b byte) []byte { return bytes.Repeat([]byte{b}, 160) }
+
+	_ = egress.SendAudio(context.Background(), session, TTSAudioChunk{TurnID: "t4", Seq: 22, MuLaw: frame(0x04)})
+	_ = egress.SendAudio(context.Background(), session, TTSAudioChunk{TurnID: "t5", Seq: 129, MuLaw: frame(0x05)})
+	_ = egress.SendAudio(context.Background(), session, TTSAudioChunk{TurnID: "t4", Seq: 23, MuLaw: frame(0x04)}) // stale
+	_ = egress.SendAudio(context.Background(), session, TTSAudioChunk{TurnID: "t5", Seq: 130, MuLaw: frame(0x05)})
+
+	if got := egress.SupersedeCount(); got != 1 {
+		t.Fatalf("supersede count = %d, want 1 (no thrash)", got)
+	}
+
+	for i := 0; i < 5; i++ {
+		clock.Advance(20 * time.Millisecond)
+	}
+	waitCapture(t, cap, 2, time.Second)
+	msgs := cap.snapshot()
+	media := 0
+	for _, msg := range msgs {
+		if !isMediaOutbound(msg.data) {
+			continue
+		}
+		media++
+		_, payload := parseOutboundMedia(t, msg.data)
+		for _, b := range payload {
+			if b != 0x05 {
+				t.Fatalf("stale t4 byte 0x%02x egressed after t5 watermark", b)
+			}
+		}
+	}
+	if media != 2 {
+		t.Fatalf("media frames = %d, want 2 (t5 only)", media)
+	}
+}
+
 func TestCarrierEgressPacingNotBurst(t *testing.T) {
 	clock := NewFakeClock(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
 	egress, session, cap := setupCarrierEgressTest(t, clock)

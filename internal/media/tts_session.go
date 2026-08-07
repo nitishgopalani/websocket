@@ -175,6 +175,14 @@ func (r *resamplingTTSStream) Close() error {
 	return r.inner.Close()
 }
 
+// Path forwards the inner TTS path label (ws/rest) through the resample wrapper.
+func (r *resamplingTTSStream) Path() string {
+	if p, ok := r.inner.(interface{ Path() string }); ok {
+		return p.Path()
+	}
+	return ""
+}
+
 func (r *resamplingTTSStream) Audio() <-chan TTSAudioChunk {
 	out := make(chan TTSAudioChunk, defaultTTSAudioBuffer)
 	go func() {

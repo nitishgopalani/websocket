@@ -304,6 +304,17 @@ func (s *sarvamTTSStream) Speak(turnID string, text string) error {
 		return nil
 	}
 
+	// Cancel other in-flight turns so a new Speak stops prior REST synthesis.
+	if s.cancelled == nil {
+		s.cancelled = make(map[string]struct{})
+	}
+	for tid, n := range s.inFlight {
+		if tid == turnID || n <= 0 {
+			continue
+		}
+		s.cancelled[tid] = struct{}{}
+	}
+
 	if s.inFlight == nil {
 		s.inFlight = make(map[string]int)
 	}

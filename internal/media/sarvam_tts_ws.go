@@ -341,6 +341,8 @@ func (s *sarvamTTSWSStream) resolveConfig(turnID string) sarvamWSConfig {
 }
 
 // Speak sends text to the TTS WebSocket or falls back to REST.
+// On Speak(newTurn) with text, prior in-flight turns are cancelled at source.
+// Sarvam WS has no cancel/clear message — Cancel closes+reopens the socket.
 func (s *sarvamTTSWSStream) Speak(turnID string, text string) error {
 	s.mu.Lock()
 	if s.closed {
@@ -366,6 +368,9 @@ func (s *sarvamTTSWSStream) Speak(turnID string, text string) error {
 	if text == "" {
 		return s.flushAndWait(turnID, state)
 	}
+
+	// Cancel any other in-flight turn before synthesizing the new one.
+	s.cancelOtherTurns(turnID)
 
 	s.mu.Lock()
 	if state.text != "" {
@@ -853,7 +858,9 @@ func (s *sarvamTTSWSStream) isCancelled(turnID string) bool {
 func (s *sarvamTTSWSStream) Cancel(turnID string) error {
 	s.mu.Lock()
 	s.cancelled[turnID] = struct{}{}
+	hadInFlight := false
 	if state, ok := s.inFlight[turnID]; ok {
+		hadInFlight = true
 		state.cancelled = true
 		if state.doneCh != nil {
 			select {
@@ -864,8 +871,56 @@ func (s *sarvamTTSWSStream) Cancel(turnID string) error {
 		}
 		delete(s.inFlight, turnID)
 	}
+	cfg := s.connConfig
+	conn := s.conn
+	closed := s.closed
 	s.mu.Unlock()
+
+	// Docs: no server-side cancel/clear — close+reopen stops generation.
+	if !closed && hadInFlight && conn != nil {
+		s.logger.Info("sarvam ws reopen on cancel (no protocol cancel)",
+			"stream_sid", s.meta.StreamSID,
+			"turn_id", turnID,
+		)
+		_ = s.connect(context.Background(), cfg)
+	}
 	return nil
+}
+
+// cancelOtherTurns locally cancels every in-flight turn except keepTurnID and
+// reopens the WS once if any were cancelled (Sarvam has no in-band cancel).
+func (s *sarvamTTSWSStream) cancelOtherTurns(keepTurnID string) {
+	s.mu.Lock()
+	var victims []string
+	for tid, state := range s.inFlight {
+		if tid == keepTurnID || state == nil || state.cancelled || state.finalSent {
+			continue
+		}
+		victims = append(victims, tid)
+		s.cancelled[tid] = struct{}{}
+		state.cancelled = true
+		if state.doneCh != nil {
+			select {
+			case <-state.doneCh:
+			default:
+				close(state.doneCh)
+			}
+		}
+		delete(s.inFlight, tid)
+	}
+	cfg := s.connConfig
+	conn := s.conn
+	closed := s.closed
+	s.mu.Unlock()
+	if len(victims) == 0 || closed || conn == nil {
+		return
+	}
+	s.logger.Info("sarvam ws reopen on cancel (no protocol cancel)",
+		"stream_sid", s.meta.StreamSID,
+		"cancelled_turns", victims,
+		"keep_turn_id", keepTurnID,
+	)
+	_ = s.connect(context.Background(), cfg)
 }
 
 func (s *sarvamTTSWSStream) Audio() <-chan TTSAudioChunk { return s.audio }

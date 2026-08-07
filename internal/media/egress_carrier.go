@@ -84,9 +84,13 @@ type CarrierEgress struct {
 
 	timingHub    *TurnTimingHub
 	watchdog     *DeadAirWatchdog
-	activeTurnID string
-	egressMarked map[string]bool
-	humanGated   bool
+	// Monotonic active-turn watermark: only frames for watermarkTurnID egress;
+	// watermark only advances (never demotes on late older-turn audio).
+	watermarkTurnID string
+	watermarkSeq    int
+	supersedeCount  int64
+	egressMarked    map[string]bool
+	humanGated      bool
 }
 
 // NewCarrierEgress constructs carrier egress with injectable clock for deterministic tests.
@@ -257,16 +261,27 @@ func (e *CarrierEgress) SendAudio(_ context.Context, session *Session, chunk TTS
 	}
 	frames := splitMuLawFrames(chunk.MuLaw, e.frameBytes)
 	e.mu.Lock()
-	// Newer turn's first chunk supersedes prior turn: drop remaining old frames.
-	if chunk.TurnID != "" && e.activeTurnID != "" && chunk.TurnID != e.activeTurnID {
-		prior := e.activeTurnID
-		dropped := len(e.pendingFrames)
-		e.pendingFrames = nil
-		if e.pendingMark != "" && e.pendingMark != chunk.TurnID {
-			e.pendingMark = ""
-		}
-		if dropped > 0 {
-			atomic.AddInt64(&e.pendingDropped, int64(dropped))
+	if chunk.TurnID != "" {
+		seq := TurnSeq(chunk.TurnID)
+		switch {
+		case e.watermarkTurnID == "":
+			e.watermarkTurnID = chunk.TurnID
+			e.watermarkSeq = seq
+		case chunk.TurnID == e.watermarkTurnID:
+			// same active turn — admit
+		case seq > 0 && seq > e.watermarkSeq:
+			prior := e.watermarkTurnID
+			dropped := len(e.pendingFrames)
+			e.pendingFrames = nil
+			if e.pendingMark != "" && e.pendingMark != chunk.TurnID {
+				e.pendingMark = ""
+			}
+			e.watermarkTurnID = chunk.TurnID
+			e.watermarkSeq = seq
+			atomic.AddInt64(&e.supersedeCount, 1)
+			if dropped > 0 {
+				atomic.AddInt64(&e.pendingDropped, int64(dropped))
+			}
 			if e.logger != nil {
 				e.logger.Info("egress turn superseded; dropped prior frames",
 					"stream_sid", session.StreamSID,
@@ -275,14 +290,26 @@ func (e *CarrierEgress) SendAudio(_ context.Context, session *Session, chunk TTS
 					"dropped_frames", dropped,
 				)
 			}
+		default:
+			// Older or unparseable non-matching turn: never demote.
+			e.mu.Unlock()
+			return nil
+		}
+		if chunk.TurnID != e.watermarkTurnID {
+			e.mu.Unlock()
+			return nil
 		}
 	}
 	for _, fr := range frames {
 		e.pendingFrames = append(e.pendingFrames, pendingFrame{turnID: chunk.TurnID, data: fr})
 	}
-	e.activeTurnID = chunk.TurnID
 	e.mu.Unlock()
 	return nil
+}
+
+// SupersedeCount returns how many times the watermark advanced (test/observability).
+func (e *CarrierEgress) SupersedeCount() int64 {
+	return atomic.LoadInt64(&e.supersedeCount)
 }
 
 func (e *CarrierEgress) Mark(_ context.Context, _ *Session, turnID string) error {
@@ -297,10 +324,12 @@ func (e *CarrierEgress) ClearPlayback(_ context.Context, session *Session) error
 	dropped := len(e.pendingFrames)
 	e.pendingFrames = nil
 	e.pendingMark = ""
-	e.activeTurnID = ""
+	// Keep watermark sticky across barge clear so late older-turn chunks cannot
+	// re-admit and thrash. Watermark only advances in SendAudio.
 	e.framesSent = 0
 	e.playbackStart = e.clock.Now()
 	e.paused = false
+	edgeBudgetMs := e.cfg.JitterMs
 	e.mu.Unlock()
 	if dropped > 0 {
 		atomic.AddInt64(&e.pendingDropped, int64(dropped))
@@ -308,15 +337,18 @@ func (e *CarrierEgress) ClearPlayback(_ context.Context, session *Session) error
 	if session == nil {
 		return nil
 	}
-	// Asterisk/Dinesh: BargeInFlushSupported=false — AsteriskSerializer.Clear is a
-	// no-op seam. Residual: frames already written to the AudioSocket/WS edge may
-	// still play until the carrier drains; local pending is dropped immediately.
+	// Asterisk/Dinesh AudioSocket binary WS: BargeInFlushSupported=false —
+	// AsteriskSerializer.Clear is a no-op (no flush/clear control frame).
+	// Residual: already-sent frames may still play; capped by EGRESS_JITTER_MS
+	// send-ahead (default 200ms).
 	if !e.profile.BargeInFlushSupported {
 		if e.logger != nil {
 			e.logger.Warn("barge-in: no carrier flush; buffered audio may still play on Asterisk edge",
 				"stream_sid", session.StreamSID,
 				"BARGEIN_FLUSH_SUPPORTED", false,
 				"residual", "asterisk_edge_buffer_uncleared",
+				"edge_buffer_budget_ms", edgeBudgetMs,
+				"channel_interface", "dinesh_audiosocket_binary_ws",
 			)
 		}
 		return nil
@@ -498,7 +530,7 @@ func (e *CarrierEgress) completePlaybackMark(session *Session, turnID string) {
 
 func (e *CarrierEgress) markEgressFirstFrame(sessionID string) {
 	e.mu.Lock()
-	turnID := e.activeTurnID
+	turnID := e.watermarkTurnID
 	if turnID == "" || e.egressMarked[turnID] {
 		e.mu.Unlock()
 		return

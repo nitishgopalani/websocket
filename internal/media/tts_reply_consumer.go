@@ -103,6 +103,11 @@ type TTSReplyConsumer struct {
 	turnHadText  map[string]bool
 	turnHadAudio map[string]bool
 
+	// Monotonic speak watermark: Speak(newTurn) advances; routeAudio drops
+	// chunks for older turn_ids (belt after producer cancel).
+	activeSpeakTurn string
+	speakWatermark  int
+
 	routeStarted bool
 }
 
@@ -248,6 +253,14 @@ func (c *TTSReplyConsumer) OnReplyChunk(ctx context.Context, session *Session, t
 	}
 	c.mu.Lock()
 	c.turnHadText[turnID] = true
+	prev := c.activeSpeakTurn
+	advance := turnID != "" && prev != turnID
+	if advance {
+		c.activeSpeakTurn = turnID
+		if n := TurnSeq(turnID); n > c.speakWatermark {
+			c.speakWatermark = n
+		}
+	}
 	c.mu.Unlock()
 	if c.logger != nil {
 		c.logger.Info("reply chunk",
@@ -256,6 +269,11 @@ func (c *TTSReplyConsumer) OnReplyChunk(ctx context.Context, session *Session, t
 			"seq", seq,
 			"text_len", len(text),
 		)
+	}
+	if advance && prev != "" && c.tts != nil {
+		// Cancel prior synthesis at source (Sarvam: close+reopen). Egress sticky
+		// watermark drops any late prior frames without barge-in clear spam.
+		_ = c.tts.Cancel(prev)
 	}
 	if c.tts == nil {
 		return
@@ -309,9 +327,20 @@ func (c *TTSReplyConsumer) routeAudio() {
 	for chunk := range c.tts.Audio() {
 		c.mu.Lock()
 		session := c.session
+		wm := c.speakWatermark
+		active := c.activeSpeakTurn
 		c.mu.Unlock()
 		if session == nil {
 			continue
+		}
+		// Belt: drop audio for turn_ids below the active speak watermark.
+		if chunk.TurnID != "" && wm > 0 {
+			if seq := TurnSeq(chunk.TurnID); seq > 0 && seq < wm {
+				continue
+			}
+			if active != "" && TurnSeqLess(chunk.TurnID, active) {
+				continue
+			}
 		}
 
 		if len(chunk.MuLaw) > 0 {

@@ -7,7 +7,8 @@ import (
 )
 
 const (
-	defaultEgressJitterMs       = 300
+	// Cap send-ahead so Asterisk edge stale tail ≤200ms (no carrier flush).
+	defaultEgressJitterMs       = 200
 	defaultOutboundBufferFrames = 64
 	egressPacingRealtime        = "realtime"
 	egressPacingBurst           = "burst"
