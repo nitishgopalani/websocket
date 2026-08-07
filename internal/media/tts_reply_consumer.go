@@ -14,6 +14,16 @@ type AudioEgress interface {
 	ClearPlayback(ctx context.Context, session *Session) error
 }
 
+// PendingDropper clears locally queued egress frames (no carrier flush).
+type PendingDropper interface {
+	DropPending() int
+}
+
+// WatermarkAdvancer sticks egress admit to a new turn before first audio.
+type WatermarkAdvancer interface {
+	AdvanceWatermark(turnID string)
+}
+
 // LoggingEgress logs audio egress until CT-10 wires Fonada playback.
 type LoggingEgress struct {
 	logger *slog.Logger
@@ -53,6 +63,8 @@ func (e *LoggingEgress) ClearPlayback(_ context.Context, session *Session) error
 	}
 	return nil
 }
+
+func (e *LoggingEgress) DropPending() int { return 0 }
 
 // SessionCloseHook is invoked when the brain signals end_call after playback mark.
 type SessionCloseHook func(ctx context.Context, session *Session)
@@ -270,10 +282,28 @@ func (c *TTSReplyConsumer) OnReplyChunk(ctx context.Context, session *Session, t
 			"text_len", len(text),
 		)
 	}
-	if advance && prev != "" && c.tts != nil {
-		// Cancel prior synthesis at source (Sarvam: close+reopen). Egress sticky
-		// watermark drops any late prior frames without barge-in clear spam.
-		_ = c.tts.Cancel(prev)
+	if advance && prev != "" {
+		// Cancel prior synthesis at source (Sarvam: close+reopen) AND drop
+		// already-queued prior frames in the pacer. Without DropPending, Cancel
+		// alone lets ~1s+ of stale audio keep pacing until the new turn's first
+		// chunk arrives (heard as overlap on call f1d04252).
+		if c.tts != nil {
+			_ = c.tts.Cancel(prev)
+		}
+		if w, ok := c.egress.(WatermarkAdvancer); ok {
+			w.AdvanceWatermark(turnID)
+		}
+		if d, ok := c.egress.(PendingDropper); ok {
+			n := d.DropPending()
+			if n > 0 && c.logger != nil {
+				c.logger.Info("egress pending dropped on speak advance",
+					"stream_sid", session.StreamSID,
+					"prior_turn_id", prev,
+					"new_turn_id", turnID,
+					"dropped_frames", n,
+				)
+			}
+		}
 	}
 	if c.tts == nil {
 		return

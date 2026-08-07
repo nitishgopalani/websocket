@@ -250,6 +250,36 @@ func TestCarrierEgressSupersedeDropsPriorTurn(t *testing.T) {
 	}
 }
 
+func TestCarrierEgressDropPendingOnSpeakAdvance(t *testing.T) {
+	clock := NewFakeClock(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+	egress, session, cap := setupCarrierEgressTest(t, clock)
+
+	t1 := bytes.Repeat([]byte{0x01}, 160*10)
+	_ = egress.SendAudio(context.Background(), session, TTSAudioChunk{TurnID: "t1", MuLaw: t1})
+	egress.AdvanceWatermark("t2")
+	dropped := egress.DropPending()
+	if dropped < 10 {
+		t.Fatalf("DropPending = %d, want >= 10", dropped)
+	}
+	// Late t1 must not re-admit after watermark advanced to t2.
+	_ = egress.SendAudio(context.Background(), session, TTSAudioChunk{TurnID: "t1", MuLaw: bytes.Repeat([]byte{0x01}, 160)})
+	_ = egress.SendAudio(context.Background(), session, TTSAudioChunk{TurnID: "t2", MuLaw: bytes.Repeat([]byte{0x02}, 160)})
+
+	clock.Advance(20 * time.Millisecond)
+	waitCapture(t, cap, 1, time.Second)
+	for _, msg := range cap.snapshot() {
+		if !isMediaOutbound(msg.data) {
+			continue
+		}
+		_, payload := parseOutboundMedia(t, msg.data)
+		for _, b := range payload {
+			if b != 0x02 {
+				t.Fatalf("stale t1 paced after DropPending+AdvanceWatermark")
+			}
+		}
+	}
+}
+
 func TestCarrierEgressStickyWatermarkInterleavedT4T5(t *testing.T) {
 	// Call 44f43121 ordering after t5 starts: t5, t4, t5 — zero t4 egress, no thrash.
 	clock := NewFakeClock(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))

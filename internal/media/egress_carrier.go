@@ -319,21 +319,45 @@ func (e *CarrierEgress) Mark(_ context.Context, _ *Session, turnID string) error
 	return nil
 }
 
-func (e *CarrierEgress) ClearPlayback(_ context.Context, session *Session) error {
+// DropPending clears locally queued egress frames without touching the carrier
+// edge and without barge-in WARN spam. Used on Speak(newTurn) so prior-turn
+// audio already in the pacer stops immediately (Cancel alone only stops TTS).
+func (e *CarrierEgress) DropPending() int {
 	e.mu.Lock()
 	dropped := len(e.pendingFrames)
 	e.pendingFrames = nil
 	e.pendingMark = ""
-	// Keep watermark sticky across barge clear so late older-turn chunks cannot
-	// re-admit and thrash. Watermark only advances in SendAudio.
 	e.framesSent = 0
 	e.playbackStart = e.clock.Now()
-	e.paused = false
-	edgeBudgetMs := e.cfg.JitterMs
 	e.mu.Unlock()
 	if dropped > 0 {
 		atomic.AddInt64(&e.pendingDropped, int64(dropped))
 	}
+	return dropped
+}
+
+// AdvanceWatermark sticks the egress admit gate to turnID immediately (before
+// first audio). Only advances; never demotes. Paired with DropPending on Speak.
+func (e *CarrierEgress) AdvanceWatermark(turnID string) {
+	if turnID == "" {
+		return
+	}
+	seq := TurnSeq(turnID)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.watermarkTurnID == "" || (seq > 0 && seq > e.watermarkSeq) {
+		e.watermarkTurnID = turnID
+		e.watermarkSeq = seq
+	}
+}
+
+func (e *CarrierEgress) ClearPlayback(_ context.Context, session *Session) error {
+	dropped := e.DropPending()
+	e.mu.Lock()
+	e.paused = false
+	edgeBudgetMs := e.cfg.JitterMs
+	e.mu.Unlock()
+	_ = dropped
 	if session == nil {
 		return nil
 	}
