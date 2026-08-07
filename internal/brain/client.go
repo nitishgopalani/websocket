@@ -374,6 +374,13 @@ func (c *Client) dispatchInbound(ctx context.Context, session *media.Session, da
 			return
 		}
 		c.markEngineFirstChunk(m.TurnID)
+		if m.VoiceID != "" || m.TTSModel != "" || m.TTSPace != nil {
+			if v, ok := c.reply.(interface {
+				SetReplyVoice(turnID, voiceID, ttsModel string, ttsPace *float64)
+			}); ok {
+				v.SetReplyVoice(m.TurnID, m.VoiceID, m.TTSModel, m.TTSPace)
+			}
+		}
 		c.reply.OnReplyChunk(ctx, session, m.TurnID, m.Seq, m.Text)
 	case FlowClassMessage:
 		if c.isSuperseded(m.TurnID) {

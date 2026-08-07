@@ -225,6 +225,15 @@ func (c *TTSReplyConsumer) CancelPlayback(ctx context.Context, turnID string) {
 	}
 }
 
+// SetReplyVoice applies optional per-turn voice_id / tts_model / tts_pace from
+// the brain chunk payload before Speak. Empty fields leave stream env defaults.
+func (c *TTSReplyConsumer) SetReplyVoice(turnID, voiceID, ttsModel string, ttsPace *float64) {
+	c.mu.Lock()
+	stream := c.tts
+	c.mu.Unlock()
+	ApplyTTSTurnVoice(stream, turnID, voiceID, ttsModel, ttsPace)
+}
+
 func (c *TTSReplyConsumer) OnReplyChunk(ctx context.Context, session *Session, turnID string, seq int, text string) {
 	c.BindSession(session)
 	if text == "" {

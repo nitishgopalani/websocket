@@ -99,6 +99,11 @@ type ChunkMessage struct {
 	TurnID string `json:"turn_id"`
 	Seq    int    `json:"seq"`
 	Text   string `json:"text"`
+	// Optional per-call TTS overrides (PaisaLo scenario voice, etc.).
+	// Empty → media keeps SARVAM_TTS_SPEAKER / SARVAM_TTS_MODEL / code defaults.
+	VoiceID  string   `json:"voice_id,omitempty"`
+	TTSModel string   `json:"tts_model,omitempty"`
+	TTSPace  *float64 `json:"tts_pace,omitempty"`
 }
 
 // FlowClassMessage hints the next expected input class for endpointing.

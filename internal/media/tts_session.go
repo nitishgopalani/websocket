@@ -41,6 +41,8 @@ func ElevenLabsPCMFormatForRate(hz int) string {
 // SampleRateFromPCMFormat parses Hz from ElevenLabs output_format strings.
 func SampleRateFromPCMFormat(format string) int {
 	switch strings.ToLower(strings.TrimSpace(format)) {
+	case "pcm_8000", "ulaw_8000":
+		return 8000
 	case "pcm_16000":
 		return 16000
 	case "pcm_22050":
@@ -49,8 +51,6 @@ func SampleRateFromPCMFormat(format string) int {
 		return 24000
 	case "pcm_44100":
 		return 44100
-	case "ulaw_8000":
-		return 8000
 	default:
 		return 24000
 	}
@@ -93,13 +93,7 @@ func OpenSessionTTSStream(
 		return nil, err
 	}
 	if sourceRate != targetRate {
-		stream = &resamplingTTSStream{
-			inner:      stream,
-			sourceRate: sourceRate,
-			targetRate: targetRate,
-			logger:     logger,
-			streamSID:  session.StreamSID,
-		}
+		stream = NewResamplingTTSStream(stream, sourceRate, targetRate, logger, session.StreamSID)
 	}
 	// Outermost layer: cache the final (post-resample) audio so a repeat of the exact
 	// same spoken line skips both the TTS network call and resampling. Key includes
@@ -114,11 +108,29 @@ func OpenSessionTTSStream(
 	return stream, nil
 }
 
+// NewResamplingTTSStream wraps a TTS stream and resamples PCM16 chunks to targetRate.
+func NewResamplingTTSStream(inner TTSStream, sourceRate, targetRate int, logger *slog.Logger, streamSID string) TTSStream {
+	if inner == nil || sourceRate <= 0 || targetRate <= 0 || sourceRate == targetRate {
+		return inner
+	}
+	return &resamplingTTSStream{
+		inner:      inner,
+		sourceRate: sourceRate,
+		targetRate: targetRate,
+		logger:     logger,
+		streamSID:  streamSID,
+	}
+}
+
 type resamplingTTSStream struct {
 	inner                        TTSStream
 	sourceRate, targetRate       int
 	logger                       *slog.Logger
 	streamSID                    string
+}
+
+func (r *resamplingTTSStream) SetTurnVoice(turnID, voiceID, model string, pace *float64) {
+	ApplyTTSTurnVoice(r.inner, turnID, voiceID, model, pace)
 }
 
 func (r *resamplingTTSStream) Speak(turnID string, text string) error {

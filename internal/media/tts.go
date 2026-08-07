@@ -37,6 +37,26 @@ type TTSStream interface {
 	Close() error
 }
 
+// TTSVoiceOverride applies per-turn speaker/model/pace overrides (Sarvam).
+// Call before Speak for that turnID. Empty voiceID/model/pace leave the
+// provider/env defaults in place for that field.
+type TTSVoiceOverride interface {
+	SetTurnVoice(turnID, voiceID, model string, pace *float64)
+}
+
+// ApplyTTSTurnVoice type-asserts stream (and common wrappers) for SetTurnVoice.
+func ApplyTTSTurnVoice(stream TTSStream, turnID, voiceID, model string, pace *float64) {
+	if stream == nil || turnID == "" {
+		return
+	}
+	if voiceID == "" && model == "" && pace == nil {
+		return
+	}
+	if v, ok := stream.(TTSVoiceOverride); ok {
+		v.SetTurnVoice(turnID, voiceID, model, pace)
+	}
+}
+
 // TTSSessionMeta carries per-call metadata when opening TTS.
 type TTSSessionMeta struct {
 	StreamSID        string

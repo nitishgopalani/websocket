@@ -133,10 +133,11 @@ type cachingTTSStream struct {
 	streamSID string
 	out       chan TTSAudioChunk
 
-	mu      sync.Mutex
-	pending map[string]*pendingTurn // turnID -> in-flight accumulation (cache miss)
-	done    chan struct{}
-	wg      sync.WaitGroup
+	mu        sync.Mutex
+	pending   map[string]*pendingTurn // turnID -> in-flight accumulation (cache miss)
+	turnVoice map[string]string       // turnID -> "voice|model" override suffix for cache key
+	done      chan struct{}
+	wg        sync.WaitGroup
 }
 
 type pendingTurn struct {
@@ -160,8 +161,34 @@ func newCachingTTSStream(inner TTSStream, keyPrefix string, cache *TTSCache, log
 	return c
 }
 
+func (c *cachingTTSStream) SetTurnVoice(turnID, voiceID, model string, pace *float64) {
+	ApplyTTSTurnVoice(c.inner, turnID, voiceID, model, pace)
+	if turnID == "" {
+		return
+	}
+	paceKey := ""
+	if pace != nil {
+		paceKey = strconv.FormatFloat(*pace, 'f', 3, 64)
+	}
+	c.mu.Lock()
+	if c.turnVoice == nil {
+		c.turnVoice = make(map[string]string)
+	}
+	// Include overrides in the cache key so a mid-call voice/pace change cannot
+	// replay audio synthesized under different TTS knobs.
+	c.turnVoice[turnID] = strings.TrimSpace(voiceID) + "|" + strings.TrimSpace(model) + "|" + paceKey
+	c.mu.Unlock()
+}
+
 func (c *cachingTTSStream) Speak(turnID string, text string) error {
-	key := ttsCacheKey(c.keyPrefix, text)
+	c.mu.Lock()
+	suffix := c.turnVoice[turnID]
+	c.mu.Unlock()
+	prefix := c.keyPrefix
+	if suffix != "" && suffix != "|" {
+		prefix = prefix + "|" + suffix
+	}
+	key := ttsCacheKey(prefix, text)
 	if frames, ok := c.cache.Get(key); ok {
 		if c.logger != nil {
 			c.logger.Info("tts cache hit",

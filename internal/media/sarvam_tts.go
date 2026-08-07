@@ -113,6 +113,7 @@ func (p *SarvamTTSProvider) Open(_ context.Context, meta TTSSessionMeta) (TTSStr
 		done:       make(chan struct{}),
 		cancelled:  make(map[string]struct{}),
 		turnSeq:    make(map[string]int),
+		turnVoice:  make(map[string]sarvamTurnVoice),
 	}
 	p.logger.Info("sarvam tts session opened",
 		"stream_sid", meta.StreamSID,
@@ -138,6 +139,12 @@ func sarvamSupportedRate(hz int) int {
 	}
 }
 
+type sarvamTurnVoice struct {
+	speaker string
+	model   string
+	pace    *float64
+}
+
 type sarvamTTSStream struct {
 	provider   *SarvamTTSProvider
 	meta       TTSSessionMeta
@@ -147,12 +154,57 @@ type sarvamTTSStream struct {
 	closed     bool
 	cancelled  map[string]struct{}
 	turnSeq    map[string]int
+	turnVoice  map[string]sarvamTurnVoice
 
 	audio chan TTSAudioChunk
 	done  chan struct{}
 	wg    sync.WaitGroup
 
 	fallbacks atomic.Int64
+}
+
+// SetTurnVoice records optional per-turn speaker/model/pace overrides for Speak.
+func (s *sarvamTTSStream) SetTurnVoice(turnID, voiceID, model string, pace *float64) {
+	if turnID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.turnVoice == nil {
+		s.turnVoice = make(map[string]sarvamTurnVoice)
+	}
+	cur := s.turnVoice[turnID]
+	if v := strings.TrimSpace(voiceID); v != "" {
+		cur.speaker = v
+	}
+	if m := strings.TrimSpace(model); m != "" {
+		cur.model = m
+	}
+	if pace != nil {
+		p := *pace
+		cur.pace = &p
+	}
+	s.turnVoice[turnID] = cur
+}
+
+func (s *sarvamTTSStream) resolveVoice(turnID string) (speaker, model string, pace *float64) {
+	speaker = s.provider.speaker
+	model = s.provider.model
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if ov, ok := s.turnVoice[turnID]; ok {
+		if ov.speaker != "" {
+			speaker = ov.speaker
+		}
+		if ov.model != "" {
+			model = ov.model
+		}
+		if ov.pace != nil {
+			p := *ov.pace
+			pace = &p
+		}
+	}
+	return speaker, model, pace
 }
 
 func (s *sarvamTTSStream) Speak(turnID string, text string) error {
@@ -172,23 +224,27 @@ func (s *sarvamTTSStream) Speak(turnID string, text string) error {
 		return nil
 	}
 
+	speaker, model, pace := s.resolveVoice(turnID)
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
-		s.synthesize(turnID, text)
+		s.synthesize(turnID, text, speaker, model, pace)
 	}()
 	return nil
 }
 
-func (s *sarvamTTSStream) synthesize(turnID, text string) {
+func (s *sarvamTTSStream) synthesize(turnID, text, speaker, model string, pace *float64) {
 	for _, part := range splitForSarvam(text, sarvamTTSMaxChars) {
 		if s.isCancelled(turnID) {
 			return
 		}
-		pcm, err := s.requestPCM(part)
+		pcm, err := s.requestPCM(part, speaker, model, pace)
 		if err != nil {
 			s.provider.logger.Warn("sarvam tts request failed",
-				"stream_sid", s.meta.StreamSID, "error", err)
+				"stream_sid", s.meta.StreamSID,
+				"speaker", speaker,
+				"model", model,
+				"error", err)
 			s.emitFailSoft(turnID)
 			return
 		}
@@ -199,28 +255,92 @@ func (s *sarvamTTSStream) synthesize(turnID, text string) {
 	s.emitFinal(turnID)
 }
 
-type sarvamTTSRequest struct {
-	Text                string `json:"text"`
-	TargetLanguageCode  string `json:"target_language_code"`
-	Speaker             string `json:"speaker"`
-	Model               string `json:"model"`
-	SpeechSampleRate    int    `json:"speech_sample_rate"`
-	EnablePreprocessing bool   `json:"enable_preprocessing"`
+// SarvamTTSRequest is the exact JSON body posted to Sarvam REST /text-to-speech.
+// Always sent: text, target_language_code, speaker, model, speech_sample_rate,
+// enable_preprocessing. Optional: pace (omitempty). Pitch / loudness are never
+// sent — bulbul:v3 returns HTTP 400 if they are present.
+type SarvamTTSRequest struct {
+	Text                string   `json:"text"`
+	TargetLanguageCode  string   `json:"target_language_code"`
+	Speaker             string   `json:"speaker"`
+	Model               string   `json:"model"`
+	SpeechSampleRate    int      `json:"speech_sample_rate"`
+	EnablePreprocessing bool     `json:"enable_preprocessing"`
+	Pace                *float64 `json:"pace,omitempty"`
+}
+
+// SarvamTTSBuildOpts are optional knobs for BuildSarvamTTSRequest.
+// Pitch/Loudness may be set by callers migrating from v2 docs but are always
+// dropped — bulbul:v3 returns HTTP 400 if either key is present in the JSON.
+type SarvamTTSBuildOpts struct {
+	Pace     *float64
+	Pitch    *float64
+	Loudness *float64
+}
+
+// BuildSarvamTTSRequest constructs the REST body used by requestPCM (D-4 probes).
+// Optional opts: Pace is included when set (clamped to [0.5, 2.0] on bulbul:v3).
+// Pitch and Loudness are accepted on the opts struct but never serialized.
+func BuildSarvamTTSRequest(text, lang, speaker, model string, sampleRate int, opts ...SarvamTTSBuildOpts) SarvamTTSRequest {
+	req := SarvamTTSRequest{
+		Text:                text,
+		TargetLanguageCode:  lang,
+		Speaker:             speaker,
+		Model:               model,
+		SpeechSampleRate:    sampleRate,
+		EnablePreprocessing: true,
+	}
+	if len(opts) == 0 {
+		return req
+	}
+	o := opts[0]
+	// Explicitly ignore — do not copy onto req (no json fields exist for them).
+	_ = o.Pitch
+	_ = o.Loudness
+	if o.Pace != nil {
+		p := *o.Pace
+		if isSarvamBulbulV3(model) {
+			p = clampSarvamV3Pace(p)
+		}
+		req.Pace = &p
+	}
+	return req
+}
+
+func isSarvamBulbulV3(model string) bool {
+	m := strings.ToLower(strings.TrimSpace(model))
+	return strings.Contains(m, "bulbul:v3") || strings.HasSuffix(m, ":v3") || m == "v3"
+}
+
+func clampSarvamV3Pace(pace float64) float64 {
+	switch {
+	case pace < 0.5:
+		return 0.5
+	case pace > 2.0:
+		return 2.0
+	default:
+		return pace
+	}
 }
 
 type sarvamTTSResponse struct {
 	Audios []string `json:"audios"`
 }
 
-func (s *sarvamTTSStream) requestPCM(text string) ([]byte, error) {
-	body, err := json.Marshal(sarvamTTSRequest{
-		Text:                text,
-		TargetLanguageCode:  s.provider.lang,
-		Speaker:             s.provider.speaker,
-		Model:               s.provider.model,
-		SpeechSampleRate:    s.sampleRate,
-		EnablePreprocessing: true,
-	})
+func (s *sarvamTTSStream) requestPCM(text, speaker, model string, pace *float64) ([]byte, error) {
+	var body []byte
+	var err error
+	if pace != nil {
+		p := *pace
+		body, err = json.Marshal(BuildSarvamTTSRequest(
+			text, s.provider.lang, speaker, model, s.sampleRate,
+			SarvamTTSBuildOpts{Pace: &p},
+		))
+	} else {
+		body, err = json.Marshal(BuildSarvamTTSRequest(
+			text, s.provider.lang, speaker, model, s.sampleRate,
+		))
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -250,7 +370,18 @@ func (s *sarvamTTSStream) requestPCM(text string) ([]byte, error) {
 		if err != nil {
 			continue
 		}
-		pcm = append(pcm, wavToPCM16(wav)...)
+		pcmPart, wavRate := wavParsePCM16(wav)
+		if wavRate <= 0 {
+			wavRate = s.sampleRate
+		}
+		if wavRate != s.sampleRate {
+			resampled, err := ResamplePCM16Linear(pcmPart, wavRate, s.sampleRate)
+			if err != nil {
+				return nil, fmt.Errorf("sarvam tts resample %d->%d: %w", wavRate, s.sampleRate, err)
+			}
+			pcmPart = resampled
+		}
+		pcm = append(pcm, pcmPart...)
 	}
 	if len(pcm) == 0 {
 		return nil, fmt.Errorf("sarvam tts returned no audio")
@@ -337,36 +468,44 @@ func (s *sarvamTTSStream) Close() error {
 
 func (s *sarvamTTSStream) Fallbacks() int64 { return s.fallbacks.Load() }
 
-// wavToPCM16 extracts the raw PCM16 sample bytes from a WAV container. If no "data"
-// chunk is found it falls back to skipping the canonical 44-byte header.
-func wavToPCM16(wav []byte) []byte {
+// wavParsePCM16 extracts PCM16 LE samples and the WAV fmt sample rate when present.
+func wavParsePCM16(wav []byte) (pcm []byte, sampleRate int) {
 	if len(wav) < 12 || !bytes.Equal(wav[0:4], []byte("RIFF")) || !bytes.Equal(wav[8:12], []byte("WAVE")) {
-		return wav // not a WAV container; assume already raw PCM
+		return wav, 0 // not a WAV container; assume already raw PCM
 	}
 	pos := 12
 	for pos+8 <= len(wav) {
 		id := wav[pos : pos+4]
 		size := int(binary.LittleEndian.Uint32(wav[pos+4 : pos+8]))
 		dataStart := pos + 8
+		if bytes.Equal(id, []byte("fmt ")) && size >= 16 && dataStart+16 <= len(wav) {
+			sampleRate = int(binary.LittleEndian.Uint32(wav[dataStart+4 : dataStart+8]))
+		}
 		if bytes.Equal(id, []byte("data")) {
 			end := dataStart + size
 			if end > len(wav) || size <= 0 {
 				end = len(wav)
 			}
-			return wav[dataStart:end]
+			return wav[dataStart:end], sampleRate
 		}
 		if size <= 0 {
 			break
 		}
 		pos = dataStart + size
 		if size%2 == 1 {
-			pos++ // chunks are word-aligned
+			pos++
 		}
 	}
 	if len(wav) > 44 {
-		return wav[44:]
+		return wav[44:], sampleRate
 	}
-	return nil
+	return nil, sampleRate
+}
+
+// wavToPCM16 extracts the raw PCM16 sample bytes from a WAV container.
+func wavToPCM16(wav []byte) []byte {
+	pcm, _ := wavParsePCM16(wav)
+	return pcm
 }
 
 // splitForSarvam breaks text into <=maxChars parts on sentence/space boundaries.
