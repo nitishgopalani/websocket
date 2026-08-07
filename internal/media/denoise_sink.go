@@ -78,6 +78,10 @@ func (s *DenoiseSink) Fallbacks() int64 {
 }
 
 func (s *DenoiseSink) OnStart(ctx context.Context, session *Session) error {
+	// Align denoise rate with session wire rate (TARGET is fallback only).
+	if session != nil && session.Format.SampleRate > 0 {
+		s.sampleRate = session.Format.SampleRate
+	}
 	return s.next.OnStart(ctx, session)
 }
 

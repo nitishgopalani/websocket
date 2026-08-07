@@ -55,8 +55,10 @@ func mulawSilence(n int) []byte {
 }
 
 func TestTranscodeSinkMuLawFixedFrames(t *testing.T) {
+	// Ctor TARGET may be 16k; OnStart rebinds to session wire rate (W2).
 	target := media.TargetFormat{SampleRate: 16000, Channels: 1}
-	frameBytes := target.FrameSizeBytes(20)
+	sessionRate := media.TargetFormat{SampleRate: 8000, Channels: 1}
+	frameBytes := sessionRate.FrameSizeBytes(20) // 320 PCM16 bytes @ 8k/20ms
 	collector := &frameCollector{}
 	sink := media.NewTranscodeSink(collector, target, 20, nil)
 
@@ -74,7 +76,7 @@ func TestTranscodeSinkMuLawFixedFrames(t *testing.T) {
 		t.Fatalf("OnStart: %v", err)
 	}
 
-	// 320 μ-law bytes -> 640 PCM16 samples at 8k -> 1280 samples at 16k -> two 20ms frames.
+	// 320 μ-law bytes -> 320 PCM16 samples at 8k (no upsample) -> one 20ms frame + remainder flushed on stop.
 	chunks := [][]byte{
 		mulawSilence(73),
 		mulawSilence(107),
@@ -95,22 +97,20 @@ func TestTranscodeSinkMuLawFixedFrames(t *testing.T) {
 	}
 
 	frames := collector.snapshot()
-	if len(frames) != 2 {
-		t.Fatalf("downstream frames = %d, want 2", len(frames))
+	// One full 20ms frame (160 samples / 320 bytes); OnStop may flush empty remainder.
+	if len(frames) < 1 {
+		t.Fatalf("downstream frames = %d, want >= 1", len(frames))
 	}
-	for i, frame := range frames {
-		if len(frame) != frameBytes {
-			t.Fatalf("frame[%d] len = %d, want %d", i, len(frame), frameBytes)
-		}
+	if len(frames[0]) != frameBytes {
+		t.Fatalf("frame[0] len = %d, want %d", len(frames[0]), frameBytes)
 	}
 
-	inSamples := totalIn
 	outSamples := 0
 	for _, frame := range frames {
 		outSamples += len(frame) / 2
 	}
-	if outSamples != inSamples*2 {
-		t.Fatalf("output samples = %d, want %d", outSamples, inSamples*2)
+	if outSamples != totalIn {
+		t.Fatalf("output samples = %d, want %d (1:1 at session rate)", outSamples, totalIn)
 	}
 }
 

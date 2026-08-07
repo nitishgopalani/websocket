@@ -98,6 +98,11 @@ type TTSReplyConsumer struct {
 	turnMeta  map[string]TurnOutcome
 	ttsMarked map[string]bool
 
+	// turnHadText / turnHadAudio gate final-fallback arming (W1): for non-empty
+	// text turns, do not arm at OnReplyDone until ≥1 audio chunk arrives.
+	turnHadText  map[string]bool
+	turnHadAudio map[string]bool
+
 	routeStarted bool
 }
 
@@ -129,6 +134,8 @@ func NewTTSReplyConsumer(
 		finalized:     make(map[string]bool),
 		turnMeta:      make(map[string]TurnOutcome),
 		ttsMarked:     make(map[string]bool),
+		turnHadText:   make(map[string]bool),
+		turnHadAudio:  make(map[string]bool),
 	}
 	if tts != nil {
 		c.routeStarted = true
@@ -239,6 +246,9 @@ func (c *TTSReplyConsumer) OnReplyChunk(ctx context.Context, session *Session, t
 	if text == "" {
 		return
 	}
+	c.mu.Lock()
+	c.turnHadText[turnID] = true
+	c.mu.Unlock()
 	if c.logger != nil {
 		c.logger.Info("reply chunk",
 			"stream_sid", session.StreamSID,
@@ -263,7 +273,10 @@ func (c *TTSReplyConsumer) OnReplyDone(ctx context.Context, session *Session, tu
 		c.endCallAfter[turnID] = true
 	}
 	c.turnMeta[turnID] = TurnOutcome{Disposition: disposition, EndCall: endCall}
-	c.armFinalFallbackLocked(turnID)
+	// W1: non-empty text turns arm only after first audio; empty-text unchanged.
+	if !c.turnHadText[turnID] || c.turnHadAudio[turnID] {
+		c.armFinalFallbackLocked(turnID)
+	}
 	c.mu.Unlock()
 
 	if c.timingHub != nil {
@@ -311,14 +324,22 @@ func (c *TTSReplyConsumer) routeAudio() {
 			if markTTS {
 				c.ttsMarked[chunk.TurnID] = true
 			}
-			// Audio still flowing for a done turn: push the final-fallback
-			// deadline out so it fires ~finalFallback after the LAST chunk.
+			c.turnHadAudio[chunk.TurnID] = true
+			// Audio flowing for a done turn: (re)arm so fallback fires after LAST chunk.
+			// Also arms turns that deferred arming at OnReplyDone until first audio (W1).
 			if c.pendingMark[chunk.TurnID] {
 				c.armFinalFallbackLocked(chunk.TurnID)
 			}
 			c.mu.Unlock()
 			if markTTS && c.timingHub != nil {
 				c.timingHub.MarkTurn(chunk.TurnID, StageTTSFirstAudio)
+				ttsPath := "rest"
+				if p, ok := c.tts.(interface{ Path() string }); ok {
+					if v := p.Path(); v != "" {
+						ttsPath = v
+					}
+				}
+				c.timingHub.SetTurnMediaPath(chunk.TurnID, "", ttsPath)
 			}
 			if err := c.egress.SendAudio(context.Background(), session, chunk); err != nil && c.logger != nil {
 				c.logger.Warn("egress send failed", "error", err)
@@ -326,6 +347,13 @@ func (c *TTSReplyConsumer) routeAudio() {
 		}
 
 		if !chunk.Final {
+			continue
+		}
+		// Ignore premature Final before first audio on non-empty text turns (W1).
+		c.mu.Lock()
+		premature := c.turnHadText[chunk.TurnID] && !c.turnHadAudio[chunk.TurnID]
+		c.mu.Unlock()
+		if premature {
 			continue
 		}
 		c.finalizeTurn(chunk.TurnID)

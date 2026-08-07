@@ -100,7 +100,7 @@ services:
       AMD_ADDR: amd:9092
       SEMANTIC_TURN_ADDR: semantic-turn:9093
       CARRIER: asterisk
-      TARGET_SAMPLE_RATE: "16000"
+      TARGET_SAMPLE_RATE: "8000"
       # Per-session output_sample_rate from session_start selects pcm_16000 vs pcm_24000.
       TTS_OUTPUT_FORMAT: ${TTS_OUTPUT_FORMAT:-}
       # Real Gemini + TTS need more time than stub; holding line plays after this ms (see watchdog.go).

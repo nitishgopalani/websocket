@@ -88,6 +88,11 @@ func sarvamTTSConfigFromEnv(cfg TTSConfig) TTSConfig {
 	return cfg
 }
 
+// sarvamTTSPaceFromEnv reads SARVAM_TTS_PACE for requestPCM default.
+func sarvamTTSPaceFromEnv() *float64 {
+	return SarvamTTSDefaultPace()
+}
+
 // SarvamTTSProvider synthesizes speech via Sarvam's REST text-to-speech endpoint.
 // Unlike ElevenLabs (WebSocket streaming) this is request/response: each Speak call
 // POSTs the full utterance and emits the returned PCM16 audio as chunks.
@@ -136,12 +141,33 @@ func NewSarvamTTSProvider(cfg TTSConfig) (*SarvamTTSProvider, error) {
 	}, nil
 }
 
-func (p *SarvamTTSProvider) Open(_ context.Context, meta TTSSessionMeta) (TTSStream, error) {
+func (p *SarvamTTSProvider) Open(ctx context.Context, meta TTSSessionMeta) (TTSStream, error) {
 	rate := meta.OutputSampleRate
 	if rate <= 0 {
 		rate = SampleRateFromPCMFormat(meta.OutputFormat)
 	}
 	sampleRate := sarvamSupportedRate(rate)
+
+	if SarvamTTSStreamingEnabled() {
+		ws := newSarvamTTSWSStream(p, meta, sampleRate)
+		if err := ws.Open(ctx); err != nil {
+			p.logger.Warn("sarvam ws open failed, falling back to REST",
+				"stream_sid", meta.StreamSID,
+				"error", err,
+			)
+		} else {
+			p.logger.Info("sarvam tts ws session opened",
+				"stream_sid", meta.StreamSID,
+				"speaker", p.speaker,
+				"model", p.model,
+				"language", p.lang,
+				"sample_rate", sampleRate,
+				"path", "ws",
+			)
+			return ws, nil
+		}
+	}
+
 	s := &sarvamTTSStream{
 		provider:   p,
 		meta:       meta,
@@ -158,9 +184,13 @@ func (p *SarvamTTSProvider) Open(_ context.Context, meta TTSSessionMeta) (TTSStr
 		"model", p.model,
 		"language", p.lang,
 		"sample_rate", sampleRate,
+		"path", "rest",
 	)
 	return s, nil
 }
+
+// Path reports the transport used by the REST stream.
+func (s *sarvamTTSStream) Path() string { return "rest" }
 
 // sarvamSupportedRate snaps a desired Hz to Sarvam's supported set {8000,16000,22050,24000}.
 func sarvamSupportedRate(hz int) int {
@@ -192,6 +222,8 @@ type sarvamTTSStream struct {
 	cancelled  map[string]struct{}
 	turnSeq    map[string]int
 	turnVoice  map[string]sarvamTurnVoice
+	inFlight   map[string]int // count of in-flight synthesis goroutines per turn
+	pendingEnd map[string]bool // turns waiting for synthesis to finish before emitFinal
 
 	audio chan TTSAudioChunk
 	done  chan struct{}
@@ -254,12 +286,29 @@ func (s *sarvamTTSStream) Speak(turnID string, text string) error {
 		s.mu.Unlock()
 		return nil
 	}
-	s.mu.Unlock()
 
 	if strings.TrimSpace(text) == "" {
+		if s.inFlight == nil {
+			s.inFlight = make(map[string]int)
+		}
+		if s.pendingEnd == nil {
+			s.pendingEnd = make(map[string]bool)
+		}
+		if s.inFlight[turnID] > 0 {
+			s.pendingEnd[turnID] = true
+			s.mu.Unlock()
+			return nil
+		}
+		s.mu.Unlock()
 		s.emitFinal(turnID)
 		return nil
 	}
+
+	if s.inFlight == nil {
+		s.inFlight = make(map[string]int)
+	}
+	s.inFlight[turnID]++
+	s.mu.Unlock()
 
 	speaker, model, pace := s.resolveVoice(turnID)
 	s.wg.Add(1)
@@ -271,6 +320,8 @@ func (s *sarvamTTSStream) Speak(turnID string, text string) error {
 }
 
 func (s *sarvamTTSStream) synthesize(turnID, text, speaker, model string, pace *float64) {
+	defer s.finishSynthesis(turnID)
+
 	for _, part := range splitForSarvam(text, sarvamTTSMaxChars) {
 		if s.isCancelled(turnID) {
 			return
@@ -289,7 +340,28 @@ func (s *sarvamTTSStream) synthesize(turnID, text, speaker, model string, pace *
 			return
 		}
 	}
-	s.emitFinal(turnID)
+}
+
+func (s *sarvamTTSStream) finishSynthesis(turnID string) {
+	s.mu.Lock()
+	if s.inFlight != nil {
+		s.inFlight[turnID]--
+		if s.inFlight[turnID] <= 0 {
+			delete(s.inFlight, turnID)
+		}
+	}
+	shouldEmitFinal := false
+	if s.pendingEnd != nil && s.pendingEnd[turnID] {
+		if s.inFlight == nil || s.inFlight[turnID] <= 0 {
+			shouldEmitFinal = true
+			delete(s.pendingEnd, turnID)
+		}
+	}
+	s.mu.Unlock()
+
+	if shouldEmitFinal {
+		s.emitFinal(turnID)
+	}
 }
 
 // SarvamTTSRequest is the exact JSON body posted to Sarvam REST /text-to-speech.
@@ -365,6 +437,9 @@ type sarvamTTSResponse struct {
 }
 
 func (s *sarvamTTSStream) requestPCM(text, speaker, model string, pace *float64) ([]byte, error) {
+	if pace == nil {
+		pace = sarvamTTSPaceFromEnv()
+	}
 	pcm, status, errBody, transportErr := s.doSarvamTTS(text, speaker, model, pace)
 	if pcm != nil {
 		return pcm, nil

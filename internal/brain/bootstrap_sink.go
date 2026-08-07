@@ -32,6 +32,8 @@ func (s *BootstrapSink) OnStart(ctx context.Context, session *media.Session) err
 	if s.Observability != nil && s.Observability.Timing != nil {
 		s.Observability.Timing.BindSession(session.StreamSID)
 		s.Observability.Timing.MarkSessionStart()
+		// Sarvam ASR is WS streaming when enabled; dump alias asr_path=ws.
+		s.Observability.Timing.SetSessionASRPath("ws")
 	}
 	if s.TTSReply != nil && s.TTSProvider != nil {
 		logger := s.Logger

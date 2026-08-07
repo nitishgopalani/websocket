@@ -103,11 +103,12 @@ func OpenSessionTTSStream(
 		OutputSampleRate: targetRate,
 		OutputFormat:     format,
 	}
-	asrRate := session.Format.SampleRate
-	if asrRate <= 0 {
-		asrRate = targetRate
+	sessionRate := session.Format.SampleRate
+	if sessionRate <= 0 {
+		sessionRate = targetRate
 	}
-	LogSessionAudioRates(logger, session.StreamSID, targetRate, sourceRate, asrRate)
+	asrRate := sessionRate
+	LogSessionAudioRates(logger, session.StreamSID, sessionRate, sourceRate, asrRate)
 	if logger != nil {
 		logger.Info("tts session output rate",
 			"stream_sid", session.StreamSID,

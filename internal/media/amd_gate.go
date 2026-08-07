@@ -114,6 +114,12 @@ func (g *AMDGateSink) DroppedDuringMachine() int64 {
 
 func (g *AMDGateSink) OnStart(ctx context.Context, session *Session) error {
 	g.session = session
+	// Align AMD window sizing with session wire rate (TARGET is fallback only).
+	if session != nil && session.Format.SampleRate > 0 && session.Format.SampleRate != g.sampleRate {
+		g.sampleRate = session.Format.SampleRate
+		g.windowBytes = pcmBytesForDurationMs(g.windowMs, g.sampleRate)
+		g.maxBufferBytes = pcmBytesForDurationMs(g.windowMs+g.marginMs, g.sampleRate)
+	}
 	if IsNoopAMD(g.clf) {
 		g.state = amdStateHuman
 		return g.startDownstream(ctx, session)

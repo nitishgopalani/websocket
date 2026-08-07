@@ -46,6 +46,14 @@ func NewTranscodeSink(next AudioSink, target TargetFormat, frameDurationMs int, 
 }
 
 func (t *TranscodeSink) OnStart(ctx context.Context, session *Session) error {
+	// Prefer session negotiated wire rate; TARGET_SAMPLE_RATE is ctor fallback only (W2).
+	if session != nil && session.Format.SampleRate > 0 {
+		t.target.SampleRate = session.Format.SampleRate
+		if t.target.Channels <= 0 {
+			t.target.Channels = 1
+		}
+		t.frameSizeBytes = t.target.FrameSizeBytes(t.frameDurationMs)
+	}
 	decoder, err := NewDecoder(session.Format, t.target)
 	if err != nil {
 		t.logger.Warn("transcode decoder unavailable; audio will be skipped for session",

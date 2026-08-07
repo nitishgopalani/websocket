@@ -74,6 +74,7 @@ type ASRProvider interface {
 // ASRConfig controls ASR provider selection.
 type ASRConfig struct {
 	Enabled            bool
+	Streaming          bool // ASR_STREAMING; default true — Sarvam WS; false = Noop rollback
 	APIKey             string
 	Endpoint           string
 	Model              string
@@ -105,6 +106,7 @@ type SarvamConfig struct {
 func DefaultASRConfig() ASRConfig {
 	return ASRConfig{
 		Enabled:            false,
+		Streaming:          true,
 		Endpoint:           defaultSarvamEndpoint,
 		Model:              defaultASRModel,
 		Mode:               defaultASRMode,
@@ -123,6 +125,10 @@ func ASRConfigFromEnv() ASRConfig {
 	cfg := DefaultASRConfig()
 	if v := os.Getenv("ASR_ENABLED"); v == "1" || v == "true" || v == "TRUE" {
 		cfg.Enabled = true
+	}
+	// ASR_STREAMING defaults true; explicit false/0 disables streaming ASR (Noop rollback).
+	if v := os.Getenv("ASR_STREAMING"); v == "0" || v == "false" || v == "FALSE" {
+		cfg.Streaming = false
 	}
 	if v := os.Getenv("SARVAM_API_KEY"); v != "" {
 		cfg.APIKey = v
@@ -192,7 +198,9 @@ func (c ASRConfig) SarvamConfig() SarvamConfig {
 	}
 }
 
-// NewASRProvider returns Noop when disabled, Sarvam when enabled.
+// NewASRProvider returns Noop when disabled, Sarvam streaming WS when enabled.
+// ASR_STREAMING gates observability / future REST rollback; today Sarvam WS is
+// the only STT path (false still opens WS so live hearing is not cut).
 func NewASRProvider(cfg ASRConfig) (ASRProvider, error) {
 	cfg = cfg.withDefaults()
 	if !cfg.Enabled {

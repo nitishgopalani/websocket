@@ -55,6 +55,8 @@ type TurnTiming struct {
 	SessionID string
 	TurnID    string
 	Opener    bool
+	ASRPath   string // "ws" | "rest" | ""
+	TTSPath   string // "ws" | "rest" | ""
 
 	mu      sync.Mutex
 	marks   map[string]time.Time
@@ -161,6 +163,7 @@ type TurnTimingHub struct {
 	byTurnID     map[string]*TurnTiming
 	pending      *TurnTiming
 	activeTurnID string
+	sessionASRPath string // default "ws" when streaming ASR is open
 }
 
 // NewTurnTimingHub constructs a per-session timing hub.
@@ -265,9 +268,43 @@ func (h *TurnTimingHub) BindEngineTurn(turnID string, opener bool) *TurnTiming {
 		t.Mark(StageSessionStart, h.sessionStart)
 	}
 	t.Mark(StageEngineSent, now)
+	if h.sessionASRPath != "" {
+		t.ASRPath = h.sessionASRPath
+	}
 	h.byTurnID[turnID] = t
 	h.activeTurnID = turnID
 	return t
+}
+
+// SetSessionASRPath records the ASR transport for this call ("ws" / "rest").
+func (h *TurnTimingHub) SetSessionASRPath(path string) {
+	if h == nil || path == "" {
+		return
+	}
+	h.mu.Lock()
+	h.sessionASRPath = path
+	h.mu.Unlock()
+}
+
+// SetTurnMediaPath records which ASR/TTS transport served a turn ("ws" / "rest").
+func (h *TurnTimingHub) SetTurnMediaPath(turnID, asrPath, ttsPath string) {
+	if h == nil || turnID == "" {
+		return
+	}
+	h.mu.Lock()
+	t := h.byTurnID[turnID]
+	h.mu.Unlock()
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if asrPath != "" {
+		t.ASRPath = asrPath
+	}
+	if ttsPath != "" {
+		t.TTSPath = ttsPath
+	}
 }
 
 // MarkTurn records a stage for a known turn ID.
@@ -362,9 +399,13 @@ func (h *TurnTimingHub) CompleteTurn(turnID string, outcome TurnOutcome) {
 			"turn_id", turnID,
 			"opener", t.Opener,
 			"asr_ms", d.ASRMS,
+			// asr_endpoint_ms: speech_end → asr_final (same as asr_ms; dump alias).
+			"asr_endpoint_ms", d.ASRMS,
 			"endpoint_ms", d.EndpointMS,
 			"engine_ms", d.EngineMS,
 			"tts_ms", d.TTSMS,
+			// tts_first_audio_ms: engine first chunk → first TTS audio (same as tts_ms).
+			"tts_first_audio_ms", d.TTSMS,
 			"mouth_to_ear_ms", d.MouthToEarMS,
 			"opener_ms", d.OpenerMS,
 			"playback_tail_ms", d.PlaybackTailMS,
@@ -373,6 +414,8 @@ func (h *TurnTimingHub) CompleteTurn(turnID string, outcome TurnOutcome) {
 			"fallback", outcome.Fallback,
 			"fallback_reason", outcome.FallbackReason,
 			"barge_in", outcome.BargeIn,
+			"asr_path", t.ASRPath,
+			"tts_path", t.TTSPath,
 			// Absolute epoch-ms stage timestamps: joined with the brain's
 			// prompt_turn_latency line (same session_id + turn_id) they give
 			// the full cross-service mouth-to-ear breakdown.
