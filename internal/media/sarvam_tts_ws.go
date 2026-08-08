@@ -124,7 +124,15 @@ type sarvamTTSWSStream struct {
 	cancelled     map[string]struct{}
 	turnSeq       map[string]int
 	turnVoice     map[string]sarvamTurnVoice
-	lastWriteNano atomic.Int64
+	// lastVoice is the most recent SetTurnVoice override (speaker/model/pace)
+	// applied to ANY turn in this session. It backstops resolveConfig for
+	// turns that have no override of their own — notably dead-air watchdog
+	// holding turns (turnID + ":hold") whose parent turn also has no
+	// SetTurnVoice (brain emitted no reply for that turn). Without this, a
+	// holding line on an empty-reply turn falls back to the env default
+	// speaker (amit) and switches the voice mid-call (priya -> amit).
+	lastVoice     sarvamTurnVoice
+	lastWriteNano  atomic.Int64
 
 	audio chan TTSAudioChunk
 	done  chan struct{}
@@ -332,13 +340,20 @@ func (s *sarvamTTSWSStream) SetTurnVoice(turnID, voiceID, model string, pace *fl
 	cur := s.turnVoice[turnID]
 	if v := strings.TrimSpace(voiceID); v != "" {
 		cur.speaker = v
+		// Track the session's last resolved voice so turns without their
+		// own override (e.g. dead-air watchdog holding turns on empty-reply
+		// turns) inherit it instead of falling back to the env default.
+		s.lastVoice.speaker = v
 	}
 	if m := strings.TrimSpace(model); m != "" {
 		cur.model = m
+		s.lastVoice.model = m
 	}
 	if pace != nil {
 		p := *pace
 		cur.pace = &p
+		pp := p
+		s.lastVoice.pace = &pp
 	}
 	s.turnVoice[turnID] = cur
 }
@@ -376,6 +391,21 @@ func (s *sarvamTTSWSStream) resolveConfig(turnID string) sarvamWSConfig {
 				p := *ov.pace
 				cfg.pace = &p
 			}
+			return cfg
+		}
+	}
+	// Final fallback: the session's last SetTurnVoice (e.g. priya from turn 1).
+	// This covers holding turns whose parent turn had no reply (and thus no
+	// SetTurnVoice) — without this, they would fall back to the env default
+	// (amit) and switch the voice mid-call.
+	if s.lastVoice.speaker != "" {
+		cfg.speaker = s.lastVoice.speaker
+		if s.lastVoice.model != "" {
+			cfg.model = s.lastVoice.model
+		}
+		if s.lastVoice.pace != nil {
+			p := *s.lastVoice.pace
+			cfg.pace = &p
 		}
 	}
 	return cfg

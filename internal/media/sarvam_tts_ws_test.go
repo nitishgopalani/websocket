@@ -1032,3 +1032,100 @@ func TestSarvamWSStream_HoldTurnInheritsParentVoice(t *testing.T) {
 		t.Errorf("hold turn speaker = %v, want priya (inherited from parent)", cfg["speaker"])
 	}
 }
+
+// TestSarvamWSStream_HoldTurnInheritsSessionLastVoice verifies that a
+// holding turn whose PARENT turn has no SetTurnVoice (brain emitted no reply
+// for that turn) still inherits the session's last resolved voice rather
+// than the env default. On a PaisaLo PREDUE call, empty-reply turns (e.g.
+// "अच्छा।") trigger the dead-air watchdog; without lastVoice fallback the
+// holding line switches priya -> amit mid-call.
+func TestSarvamWSStream_HoldTurnInheritsSessionLastVoice(t *testing.T) {
+	var connectCount atomic.Int32
+	var lastConfig atomic.Value
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		connectCount.Add(1)
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			_, data, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			var msg sarvamWSMessage
+			if err := json.Unmarshal(data, &msg); err != nil {
+				continue
+			}
+			switch msg.Type {
+			case "config":
+				lastConfig.Store(msg.Data)
+			case "text":
+				pcm := make([]byte, 320)
+				audioResp := map[string]any{
+					"type": "audio",
+					"data": map[string]any{
+						"audio":        base64.StdEncoding.EncodeToString(pcm),
+						"content_type": "audio/raw",
+					},
+				}
+				payload, _ := json.Marshal(audioResp)
+				_ = conn.WriteMessage(websocket.TextMessage, payload)
+			case "flush":
+				finalResp := map[string]any{
+					"type": "event",
+					"data": map[string]any{"event_type": "final"},
+				}
+				payload, _ := json.Marshal(finalResp)
+				_ = conn.WriteMessage(websocket.TextMessage, payload)
+			}
+		}
+	}))
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	provider := &SarvamTTSProvider{
+		apiKey:  "test-key",
+		baseURL: srv.URL,
+		model:   "bulbul:v3",
+		speaker: "amit", // env default
+		lang:    "hi-IN",
+		logger:  slog.Default(),
+	}
+	ws := newSarvamTTSWSStream(provider, TTSSessionMeta{StreamSID: "last-voice"}, 8000)
+	ws.wsURL = wsURL
+
+	if err := ws.Open(context.Background()); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer ws.Close()
+
+	// turn-1 sets priya (the session's last voice).
+	ws.SetTurnVoice("turn-1", "priya", "bulbul:v3", nil)
+	if err := ws.Speak("turn-1", "नमस्ते"); err != nil {
+		t.Fatalf("Speak turn-1: %v", err)
+	}
+	// turn-4 is an empty-reply turn: brain never calls SetTurnVoice("turn-4", ...).
+	// The watchdog fires a holding line for turn-4:hold. It must inherit the
+	// session's last voice (priya from turn-1), NOT the env default (amit).
+	if err := ws.Speak("turn-4:hold", "ek minute"); err != nil {
+		t.Fatalf("Speak turn-4:hold: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if lastConfig.Load() != nil && connectCount.Load() >= 1 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	cfg, ok := lastConfig.Load().(map[string]any)
+	if !ok {
+		t.Fatal("no config received")
+	}
+	if cfg["speaker"] != "priya" {
+		t.Errorf("hold turn (no parent voice) speaker = %v, want priya (inherited from session last voice)", cfg["speaker"])
+	}
+}
