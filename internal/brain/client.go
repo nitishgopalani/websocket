@@ -148,6 +148,7 @@ func (c *Client) Connect(ctx context.Context, session *media.Session) error {
 		PackID:     sessionParam(session, c.cfg.PackIDParam, ""),
 		Locale:          resolveBrainLocale(session),
 		TenantID:        resolveBrainTenant(session, c.cfg.TenantID),
+		ClientID:        sessionParam(session, "client_id", ""),
 		BorrowerContext: buildBorrowerContext(session),
 	}
 	if err := c.writeJSON(start); err != nil {

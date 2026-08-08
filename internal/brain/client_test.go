@@ -199,6 +199,92 @@ func TestClientForwardsClientIDAsTenant(t *testing.T) {
 	}
 }
 
+// TestClientForwardsClientIDVerbatim (HARDEN-1 F2, G-A3-03): the connector's
+// per-DID client_id must reach the brain as session_start.client_id verbatim,
+// AND tenant_id must still be injected (explicit param or BRAIN_TENANT_ID) for
+// one more release so older brain builds keep working. The brain resolves
+// tenant as client_id > session_tenant_id > reject, so on the BYO path a stale
+// tenant_id must NOT overwrite client_id — this test proves the go-server hands
+// the brain both fields so the brain can make that call.
+func TestClientForwardsClientIDVerbatim(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	startCh := make(chan brain.SessionStartPayload, 1)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			_, data, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			var header struct {
+				Type string `json:"type"`
+			}
+			_ = json.Unmarshal(data, &header)
+			if header.Type == brain.TypeSessionStart {
+				var start brain.SessionStartPayload
+				_ = json.Unmarshal(data, &start)
+				startCh <- start
+				_ = conn.WriteJSON(brain.SessionReadyPayload{
+					Type:        brain.TypeSessionReady,
+					SessionID:   start.SessionID,
+					AsrLanguage: "hi-IN",
+				})
+			}
+		}
+	}))
+	defer srv.Close()
+
+	// BYO/media-meta path: connector stamps client_id=paisalo in metadata, and
+	// a stale tenant_id=salary_on_time is still present in params (one more release).
+	control, err := media.ParseAsteriskControl([]byte(`{
+		"type": "session_start",
+		"session_id": "ast-paisalo-1",
+		"client_id": "paisalo",
+		"metadata": {"agent_id": "paisalo-test", "tenant_id": "salary_on_time"}
+	}`))
+	if err != nil {
+		t.Fatalf("parse asterisk session_start: %v", err)
+	}
+	startEvent := media.AsteriskStartToStartEvent(*control.Start)
+	session := &media.Session{
+		StreamSID: startEvent.StreamSID,
+		Params:    startEvent.CustomParameters,
+	}
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	tm := media.NewTurnManager(nil, media.DefaultEndpointConfig(), media.NewFakeClock(time.Now()), media.NoopVAD{}, nil, media.SemanticTurnConfig{}, nil, nil)
+	client := brain.NewClient(brain.Config{Enabled: true, URL: wsURL}, &recordingReplyConsumer{}, tm, nil)
+	if err := client.Connect(context.Background(), session); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer client.Close()
+
+	select {
+	case got := <-startCh:
+		// F2: client_id forwarded verbatim — the brain uses this as the tenant
+		// source of truth (client_id > session_tenant_id > reject).
+		if got.ClientID != "paisalo" {
+			t.Fatalf("client_id = %q, want paisalo (must forward verbatim)", got.ClientID)
+		}
+		// tenant_id is still injected (explicit metadata.tenant_id wins over the
+		// BRAIN_TENANT_ID fallback) so older brain builds keep working one more
+		// release. The brain must NOT let this stale value override client_id.
+		if got.TenantID != "salary_on_time" {
+			t.Fatalf("tenant_id = %q, want salary_on_time (injected for one more release)", got.TenantID)
+		}
+		if got.AgentID != "paisalo-test" {
+			t.Fatalf("agent_id = %q, want paisalo-test", got.AgentID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("brain never received session_start")
+	}
+}
+
 // TestClientTenantPrecedence: an explicit tenant_id param beats client_id, and
 // BRAIN_TENANT_ID remains the fallback when neither is present.
 func TestClientTenantPrecedence(t *testing.T) {

@@ -48,6 +48,13 @@ type SessionStartPayload struct {
 	PackID          string                  `json:"pack_id,omitempty"`
 	Locale          string                  `json:"locale,omitempty"`
 	TenantID        string                  `json:"tenant_id,omitempty"`
+	// ClientID is the connector's per-DID client_id forwarded verbatim
+	// (HARDEN-1 F2, G-A3-03). The brain resolves tenant as
+	// client_id > session_tenant_id > reject, so this field is the source of
+	// truth on the BYO/media-meta path. TenantID above is still injected
+	// (explicit tenant_id param or BRAIN_TENANT_ID fallback) for one more
+	// release so older brain builds keep working.
+	ClientID        string                  `json:"client_id,omitempty"`
 	BorrowerContext *BorrowerContextPayload `json:"borrower_context,omitempty"`
 }
 
