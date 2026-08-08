@@ -101,6 +101,12 @@ func TestSarvamWSStream_AudioChunksArrive(t *testing.T) {
 	}
 	defer ws.Close()
 
+	// R3-TTS: Open no longer dials — the first Speak dials and sends the config
+	// frame with the resolved voice. So config arrives AFTER Speak, not Open.
+	if err := ws.Speak("turn-1", "नमस्ते"); err != nil {
+		t.Fatalf("Speak failed: %v", err)
+	}
+
 	select {
 	case cfg := <-configReceived:
 		if cfg["speaker"] != "amit" {
@@ -117,10 +123,6 @@ func TestSarvamWSStream_AudioChunksArrive(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for config")
-	}
-
-	if err := ws.Speak("turn-1", "नमस्ते"); err != nil {
-		t.Fatalf("Speak failed: %v", err)
 	}
 
 	select {
@@ -504,16 +506,17 @@ func TestSarvamWSStream_VoiceChangeReconnects(t *testing.T) {
 	}
 	defer ws.Close()
 
-	time.Sleep(100 * time.Millisecond)
-	initialConnects := connectCount.Load()
-	if initialConnects < 1 {
-		t.Fatal("expected at least 1 initial connection")
-	}
-
+	// R3-TTS: Open no longer dials — the first Speak dials with the resolved
+	// voice (here the provider default amit). So the initial connection happens
+	// on Speak, not Open.
 	if err := ws.Speak("turn-1", "hello"); err != nil {
 		t.Fatalf("Speak 1 failed: %v", err)
 	}
 	time.Sleep(100 * time.Millisecond)
+	initialConnects := connectCount.Load()
+	if initialConnects < 1 {
+		t.Fatal("expected at least 1 connection after first Speak")
+	}
 
 	ws.SetTurnVoice("turn-2", "neha", "bulbul:v3", nil)
 	if err := ws.Speak("turn-2", "world"); err != nil {
@@ -780,5 +783,149 @@ func TestSarvamTTSStreamingEnabled(t *testing.T) {
 	t.Setenv("SARVAM_TTS_STREAMING", "1")
 	if !SarvamTTSStreamingEnabled() {
 		t.Error("should be enabled when 1")
+	}
+}
+
+// R3-TTS(b): the first Speak carrying a voice override != the env default must
+// synthesize with the override directly — no voice-change event, no second
+// connection. (This was broken independent of eager open: the eager open used
+// the env default, then the first Speak's override triggered a reconnect.)
+func TestSarvamWSStream_FirstSpeakVoiceOverrideNoReconnect(t *testing.T) {
+	var connectCount atomic.Int32
+	var lastConfig atomic.Value
+
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		connectCount.Add(1)
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			_, data, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			var msg sarvamWSMessage
+			if err := json.Unmarshal(data, &msg); err != nil {
+				continue
+			}
+			switch msg.Type {
+			case "config":
+				lastConfig.Store(msg.Data)
+			case "text":
+				pcm := make([]byte, 320)
+				audioResp := map[string]any{
+					"type": "audio",
+					"data": map[string]any{
+						"audio":        base64.StdEncoding.EncodeToString(pcm),
+						"content_type": "audio/raw",
+					},
+				}
+				payload, _ := json.Marshal(audioResp)
+				_ = conn.WriteMessage(websocket.TextMessage, payload)
+			case "flush":
+				finalResp := map[string]any{
+					"type": "event",
+					"data": map[string]any{"event_type": "final"},
+				}
+				payload, _ := json.Marshal(finalResp)
+				_ = conn.WriteMessage(websocket.TextMessage, payload)
+			}
+		}
+	}))
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	provider := &SarvamTTSProvider{
+		apiKey:  "test-key",
+		baseURL: srv.URL,
+		model:   "bulbul:v3",
+		speaker: "amit", // env default
+		lang:    "hi-IN",
+		logger:  slog.Default(),
+	}
+	ws := newSarvamTTSWSStream(provider, TTSSessionMeta{StreamSID: "override-test", CallSID: "c-override"}, 8000)
+	ws.wsURL = wsURL
+
+	if err := ws.Open(context.Background()); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer ws.Close()
+
+	// Override the voice for turn-1 to priya (!= env default amit) BEFORE Speak.
+	ws.SetTurnVoice("turn-1", "priya", "bulbul:v3", nil)
+	if err := ws.Speak("turn-1", "नमस्ते"); err != nil {
+		t.Fatalf("Speak: %v", err)
+	}
+	_ = ws.Speak("turn-1", "") // flush
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if lastConfig.Load() != nil && connectCount.Load() >= 1 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// Exactly ONE connection — the override must NOT trigger a voice-change
+	// reconnect (a reconnect here would mean the eager-open default was used
+	// first, which is exactly the bug R3-TTS fixes).
+	if got := connectCount.Load(); got != 1 {
+		t.Errorf("connectCount = %d, want 1 (override must not trigger reconnect)", got)
+	}
+	cfg, ok := lastConfig.Load().(map[string]any)
+	if !ok {
+		t.Fatal("no config received")
+	}
+	if cfg["speaker"] != "priya" {
+		t.Errorf("config speaker = %v, want priya (the override)", cfg["speaker"])
+	}
+}
+
+// R3-TTS(c): a session with zero Speaks must not open a Sarvam connection at all.
+func TestSarvamWSStream_ZeroSpeaksNoConnection(t *testing.T) {
+	var connectCount atomic.Int32
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		connectCount.Add(1)
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	provider := &SarvamTTSProvider{
+		apiKey:  "test-key",
+		baseURL: srv.URL,
+		model:   "bulbul:v3",
+		speaker: "amit",
+		lang:    "hi-IN",
+		logger:  slog.Default(),
+	}
+	ws := newSarvamTTSWSStream(provider, TTSSessionMeta{StreamSID: "zero-speak"}, 8000)
+	ws.wsURL = wsURL
+
+	if err := ws.Open(context.Background()); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	// No Speak calls at all — give the (would-be) dial time to misbehave.
+	time.Sleep(250 * time.Millisecond)
+	if got := connectCount.Load(); got != 0 {
+		t.Errorf("connectCount = %d, want 0 (zero Speaks must not connect)", got)
+	}
+	_ = ws.Close()
+	time.Sleep(100 * time.Millisecond)
+	if got := connectCount.Load(); got != 0 {
+		t.Errorf("connectCount after close = %d, want 0", got)
 	}
 }

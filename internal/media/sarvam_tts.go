@@ -151,14 +151,20 @@ func (p *SarvamTTSProvider) Open(ctx context.Context, meta TTSSessionMeta) (TTSS
 	if SarvamTTSStreamingEnabled() {
 		ws := newSarvamTTSWSStream(p, meta, sampleRate)
 		if err := ws.Open(ctx); err != nil {
+			// Unreachable today: Open no longer dials (deferred to first Speak).
+			// Kept for safety; a dial failure surfaces on the first Speak instead
+			// and falls back to REST there.
 			p.logger.Warn("sarvam ws open failed, falling back to REST",
 				"stream_sid", meta.StreamSID,
 				"error", err,
 			)
 		} else {
-			p.logger.Info("sarvam tts ws session opened",
+			// No WS connection yet — the first Speak dials with its resolved
+			// voice/model/pace. Log the env default here for traceability; the
+			// real (override) speaker is logged in connect() on first Speak.
+			p.logger.Info("sarvam tts ws stream ready (deferred open)",
 				"stream_sid", meta.StreamSID,
-				"speaker", p.speaker,
+				"default_speaker", p.speaker,
 				"model", p.model,
 				"language", p.lang,
 				"sample_rate", sampleRate,

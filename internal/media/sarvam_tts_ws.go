@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -95,6 +96,14 @@ func (c sarvamWSConfig) equal(other sarvamWSConfig) bool {
 		return false
 	}
 	return *c.pace == *other.pace
+}
+
+// paceStr formats a *float64 pace for logs (nil → "default").
+func paceStr(p *float64) string {
+	if p == nil {
+		return "default"
+	}
+	return strconv.FormatFloat(*p, 'f', -1, 64)
 }
 
 // sarvamTTSWSStream implements TTSStream using Sarvam's WebSocket API.
@@ -192,12 +201,14 @@ func newSarvamTTSWSStream(provider *SarvamTTSProvider, meta TTSSessionMeta, samp
 	return s
 }
 
-// Open dials the WebSocket and starts background loops.
+// Open starts the background read/keepalive loops WITHOUT dialing the Sarvam
+// WebSocket. The WS is dialed lazily on the first Speak, with that Speak's
+// resolved voice/model/pace — so a voice override != the env default synthesizes
+// with the override directly (no voice-change event, no second connection), and
+// a session with zero Speaks never opens a Sarvam connection at all. readLoop and
+// keepaliveLoop tolerate a nil conn (they spin until the first Speak connects).
+// Optional TCP pre-warm at session_start is config-deferred (not wired here).
 func (s *sarvamTTSWSStream) Open(ctx context.Context) error {
-	cfg := s.defaultConfig()
-	if err := s.connect(ctx, cfg); err != nil {
-		return err
-	}
 	s.wg.Add(2)
 	go s.readLoop()
 	go s.keepaliveLoop()
@@ -256,6 +267,17 @@ func (s *sarvamTTSWSStream) connect(ctx context.Context, cfg sarvamWSConfig) err
 		s.mu.Unlock()
 		return fmt.Errorf("sarvam ws config: %w", err)
 	}
+	// Log the REAL speaker (the first Speak's resolved override, not the env
+	// default) so the voice timeline shows the override from the first synthesis.
+	s.logger.Info("sarvam tts ws session opened",
+		"stream_sid", s.meta.StreamSID,
+		"speaker", cfg.speaker,
+		"model", cfg.model,
+		"language", cfg.language,
+		"sample_rate", cfg.sampleRate,
+		"pace", paceStr(cfg.pace),
+		"path", "ws",
+	)
 	return nil
 }
 
