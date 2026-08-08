@@ -358,6 +358,25 @@ func (s *sarvamTTSWSStream) resolveConfig(turnID string) sarvamWSConfig {
 			p := *ov.pace
 			cfg.pace = &p
 		}
+		return cfg
+	}
+	// Dead-air watchdog holding turns (turnID + ":hold") have no SetTurnVoice
+	// override of their own; inherit the parent turn's resolved voice so the
+	// holding line ("ek minute") uses the session's speaker instead of the
+	// env default (amit) — prevents a mid-call voice switch (priya→amit).
+	if parent := strings.TrimSuffix(turnID, ":hold"); parent != turnID {
+		if ov, ok := s.turnVoice[parent]; ok {
+			if ov.speaker != "" {
+				cfg.speaker = ov.speaker
+			}
+			if ov.model != "" {
+				cfg.model = ov.model
+			}
+			if ov.pace != nil {
+				p := *ov.pace
+				cfg.pace = &p
+			}
+		}
 	}
 	return cfg
 }

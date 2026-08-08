@@ -929,3 +929,106 @@ func TestSarvamWSStream_ZeroSpeaksNoConnection(t *testing.T) {
 		t.Errorf("connectCount after close = %d, want 0", got)
 	}
 }
+
+// TestSarvamWSStream_HoldTurnInheritsParentVoice verifies that a dead-air
+// watchdog holding turn (turnID + ":hold") inherits the parent turn's
+// resolved voice instead of falling back to the env default speaker. Without
+// this, the holding line ("ek minute") switches the voice mid-call (e.g.
+// priya -> amit), which is exactly the R3-TTS regression we saw on UAT.
+func TestSarvamWSStream_HoldTurnInheritsParentVoice(t *testing.T) {
+	var connectCount atomic.Int32
+	var lastConfig atomic.Value
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		connectCount.Add(1)
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			_, data, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			var msg sarvamWSMessage
+			if err := json.Unmarshal(data, &msg); err != nil {
+				continue
+			}
+			switch msg.Type {
+			case "config":
+				lastConfig.Store(msg.Data)
+			case "text":
+				pcm := make([]byte, 320)
+				audioResp := map[string]any{
+					"type": "audio",
+					"data": map[string]any{
+						"audio":        base64.StdEncoding.EncodeToString(pcm),
+						"content_type": "audio/raw",
+					},
+				}
+				payload, _ := json.Marshal(audioResp)
+				_ = conn.WriteMessage(websocket.TextMessage, payload)
+			case "flush":
+				finalResp := map[string]any{
+					"type": "event",
+					"data": map[string]any{"event_type": "final"},
+				}
+				payload, _ := json.Marshal(finalResp)
+				_ = conn.WriteMessage(websocket.TextMessage, payload)
+			}
+		}
+	}))
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	provider := &SarvamTTSProvider{
+		apiKey:  "test-key",
+		baseURL: srv.URL,
+		model:   "bulbul:v3",
+		speaker: "amit", // env default
+		lang:    "hi-IN",
+		logger:  slog.Default(),
+	}
+	ws := newSarvamTTSWSStream(provider, TTSSessionMeta{StreamSID: "hold-inherit"}, 8000)
+	ws.wsURL = wsURL
+
+	if err := ws.Open(context.Background()); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer ws.Close()
+
+	// Parent turn uses priya (override != env default).
+	ws.SetTurnVoice("turn-3", "priya", "bulbul:v3", nil)
+	if err := ws.Speak("turn-3", "नमस्ते"); err != nil {
+		t.Fatalf("Speak turn-3: %v", err)
+	}
+	// Holding turn (turn-3:hold) — no SetTurnVoice of its own. It must inherit
+	// priya from turn-3 so the holding line doesn't switch to amit.
+	if err := ws.Speak("turn-3:hold", "ek minute"); err != nil {
+		t.Fatalf("Speak turn-3:hold: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if lastConfig.Load() != nil && connectCount.Load() >= 1 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// The hold turn inherits priya, so the speaker is UNCHANGED from turn-3.
+	// A cancel/reopen on the new Speak is expected (Sarvam WS has no cancel
+	// message), but a VOICE-CHANGE reconnect must NOT fire — connectCount
+	// stays at 2 (turn-3 + cancel/reopen for turn-3:hold), not 3.
+	if got := connectCount.Load(); got > 2 {
+		t.Errorf("connectCount = %d, want <= 2 (hold turn must not trigger a voice-change reconnect)", got)
+	}
+	cfg, ok := lastConfig.Load().(map[string]any)
+	if !ok {
+		t.Fatal("no config received")
+	}
+	if cfg["speaker"] != "priya" {
+		t.Errorf("hold turn speaker = %v, want priya (inherited from parent)", cfg["speaker"])
+	}
+}
