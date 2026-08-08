@@ -315,20 +315,24 @@ drainLoop:
 	recordable := contentCnt == 1
 
 	seq := 0
-	liveProduced := false
-	replayProduced := false
+	// activeProducer tracks which producer is currently emitting for this turn.
+	// The single-threaded worker guarantees only one is active at a time; the
+	// guard is a belt that should never fire. Mixed turns (some cached, some live)
+	// are valid and serialized — replayActive and liveActive never overlap.
+	var replayActive, liveActive bool
 
 	for i := range segments {
 		seg := segments[i]
 		if len(seg.cachedFrames) > 0 {
-			replayProduced = true
-			c.guardMultiProducer(turnID, replayProduced, liveProduced)
+			c.guardMultiProducer(turnID, replayActive, liveActive)
+			replayActive = true
 			for _, f := range seg.cachedFrames {
 				seq++
 				if !c.emitChunk(turnID, seq, f, false) {
 					return
 				}
 			}
+			replayActive = false
 			continue
 		}
 		// Live segment: ask inner to synthesize this segment's text, then forward
@@ -336,20 +340,23 @@ drainLoop:
 		// batch. We flush inner after each live segment so inner emits a self-
 		// contained batch (inner WS appends texts across Speaks for the same
 		// turnID otherwise).
-		liveProduced = true
-		c.guardMultiProducer(turnID, replayProduced, liveProduced)
+		c.guardMultiProducer(turnID, replayActive, liveActive)
+		liveActive = true
 		if err := c.inner.Speak(turnID, seg.text); err != nil {
 			if c.logger != nil {
 				c.logger.Warn("tts cache inner speak failed",
 					"stream_sid", c.streamSID, "turn_id", turnID, "error", err)
 			}
+			liveActive = false
 			continue
 		}
 		_ = c.inner.Speak(turnID, "")
 		if recordable {
 			ts.recordKey = seg.key
 		}
-		if !c.forwardInnerBatch(turnID, ts, &seq, recordable) {
+		ok := c.forwardInnerBatch(turnID, ts, &seq, recordable)
+		liveActive = false
+		if !ok {
 			return
 		}
 	}
@@ -392,13 +399,16 @@ func (c *cachingTTSStream) forwardInnerBatch(turnID string, ts *turnSession, seq
 	}
 }
 
-// guardMultiProducer logs a belt WARN if both replay and inner produced frames for
-// the same turn. After the serialization fix this should be impossible.
-func (c *cachingTTSStream) guardMultiProducer(turnID string, replay, live bool) {
-	if replay && live && c.logger != nil {
+// guardMultiProducer logs a belt WARN if replay and inner are both actively
+// producing frames for the same turn at the same instant. After the per-turn
+// serialization fix the worker is single-threaded, so this should be impossible;
+// mixed turns (some cached, some live) are valid and serialized — the flags
+// never overlap, so this never fires for them.
+func (c *cachingTTSStream) guardMultiProducer(turnID string, replayActive, liveActive bool) {
+	if replayActive && liveActive && c.logger != nil {
 		c.logger.Warn("tts_multi_producer",
 			"stream_sid", c.streamSID, "turn_id", turnID,
-			"note", "replay and live both produced for one turn")
+			"note", "replay and live both actively producing for one turn")
 	}
 }
 
