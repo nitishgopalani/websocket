@@ -10,7 +10,10 @@ import (
 )
 
 const (
-	defaultFallbackNoAudioMs = 2000
+	// Agent dead-air after caller EOT / opener — holding line only if no egress.
+	// 5s default avoids speaking over normal brain+TTS; retest gap t4→t6 was
+	// caller silence + superseded turn, not this path.
+	defaultFallbackNoAudioMs = 5000
 	defaultHoldingLine       = "ek minute"
 )
 

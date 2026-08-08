@@ -407,6 +407,75 @@ func TestCarrierEgressClearPlaybackDropsPending(t *testing.T) {
 	}
 }
 
+func TestCarrierEgressAsteriskBargeEmitsClearFrame(t *testing.T) {
+	clock := NewFakeClock(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+	cap := &outboundCapture{clock: clock}
+	cfg := DefaultEgressConfig()
+	cfg.JitterMs = 200
+	profile := CarrierConfig{Variant: CarrierAsterisk}.Profile()
+	egress := NewCarrierEgress(cfg, 20, clock, AsteriskSerializer{}, profile, nil)
+
+	mgr := NewSessionManager(DefaultConfig(), nil, func() AudioSink {
+		return NewLoggingSink(nil)
+	}, nil)
+	ctx := context.Background()
+	serverConn, clientConn := newWSConnPair(t)
+	session, err := mgr.Create(ctx, StartEvent{
+		Event:       EventStart,
+		StreamSID:   "MZ-AST-CLEAR",
+		CallSID:     "CA-AST",
+		MediaFormat: AudioFormat{Encoding: "audio/x-l16", SampleRate: 8000, Channels: 1},
+	}, serverConn)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	t.Cleanup(func() {
+		mgr.Close(ctx, session.StreamSID)
+		_ = clientConn.Close()
+	})
+	go func() {
+		for {
+			_, data, err := clientConn.ReadMessage()
+			if err != nil {
+				return
+			}
+			cap.mu.Lock()
+			cap.msgs = append(cap.msgs, capturedOutbound{data: append([]byte(nil), data...)})
+			cap.mu.Unlock()
+		}
+	}()
+	egress.BindSession(session)
+
+	// Asterisk BindSession uses 24 kHz egress (960 B/frame); enqueue enough for ≥10 pending.
+	pcm := make([]byte, 960*12)
+	_ = egress.SendAudio(context.Background(), session, TTSAudioChunk{TurnID: "t1", MuLaw: pcm})
+	if err := egress.ClearPlayback(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	if got := egress.PendingDropped(); got < 10 {
+		t.Fatalf("PendingDropped=%d, want >=10", got)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	var clearOK bool
+	for time.Now().Before(deadline) {
+		for _, msg := range cap.snapshot() {
+			var m map[string]string
+			if json.Unmarshal(msg.data, &m) == nil && m["type"] == AsteriskMsgClear {
+				clearOK = true
+				break
+			}
+		}
+		if clearOK {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !clearOK {
+		t.Fatal("expected Asterisk TEXT {\"type\":\"clear\"} on success path")
+	}
+}
+
 func TestInboundMarkEchoPlaybackComplete(t *testing.T) {
 	var completed atomic.Int32
 	var turnID string

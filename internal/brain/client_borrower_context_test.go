@@ -6,12 +6,13 @@ import (
 	"websocket/internal/media"
 )
 
-func TestBuildBorrowerContextUsesCallSIDFallback(t *testing.T) {
+func TestBuildBorrowerContextUsesCustomerPhoneNotCallSID(t *testing.T) {
 	session := &media.Session{
 		StreamSID: "MZ-1",
-		CallSID:   "+919810587857",
+		CallSID:   "channel-id-not-a-phone",
 		Params: map[string]string{
-			"language": "en-IN",
+			"language":       "en-IN",
+			"customer_phone": "+919810587857",
 		},
 	}
 	ctx := buildBorrowerContext(session)
@@ -19,7 +20,7 @@ func TestBuildBorrowerContextUsesCallSIDFallback(t *testing.T) {
 		t.Fatal("expected borrower context")
 	}
 	if ctx.Phone != "+919810587857" {
-		t.Fatalf("phone = %q, want caller number from CallSID", ctx.Phone)
+		t.Fatalf("phone = %q, want customer_phone (not CallSID)", ctx.Phone)
 	}
 }
 
@@ -60,6 +61,23 @@ func TestBuildBorrowerContextDerivesPhoneFromStreamSID(t *testing.T) {
 	}
 	if ctx.Phone != "9810587857" {
 		t.Fatalf("phone = %q, want 9810587857 derived from stream SID", ctx.Phone)
+	}
+}
+
+func TestBuildBorrowerContextEmptyPhoneLogsFallback(t *testing.T) {
+	session := &media.Session{
+		StreamSID: "uuid-no-phone-digits",
+		CallSID:   "CA-empty",
+		Params: map[string]string{
+			"language": "hi-IN",
+		},
+	}
+	ctx := buildBorrowerContext(session)
+	if ctx == nil {
+		t.Fatal("expected borrower context (language set)")
+	}
+	if ctx.Phone != "" {
+		t.Fatalf("phone = %q, want empty", ctx.Phone)
 	}
 }
 

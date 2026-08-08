@@ -15,7 +15,8 @@ func (AsteriskSerializer) Mark(_ string, _ string) ([]byte, error) {
 }
 
 func (AsteriskSerializer) Clear(_ string) ([]byte, error) {
-	return nil, nil
+	// Match asterisk-connector MsgClear contract (wsclient.go): TEXT {"type":"clear"}.
+	return AsteriskClearMessage()
 }
 
 func (AsteriskSerializer) Ready() ([]byte, error) {

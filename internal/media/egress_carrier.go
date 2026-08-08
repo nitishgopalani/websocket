@@ -357,14 +357,9 @@ func (e *CarrierEgress) ClearPlayback(_ context.Context, session *Session) error
 	e.paused = false
 	edgeBudgetMs := e.cfg.JitterMs
 	e.mu.Unlock()
-	_ = dropped
 	if session == nil {
 		return nil
 	}
-	// Asterisk/Dinesh AudioSocket binary WS: BargeInFlushSupported=false —
-	// AsteriskSerializer.Clear is a no-op (no flush/clear control frame).
-	// Residual: already-sent frames may still play; capped by EGRESS_JITTER_MS
-	// send-ahead (default 200ms).
 	if !e.profile.BargeInFlushSupported {
 		if e.logger != nil {
 			e.logger.Warn("barge-in: no carrier flush; buffered audio may still play on Asterisk edge",
@@ -373,15 +368,46 @@ func (e *CarrierEgress) ClearPlayback(_ context.Context, session *Session) error
 				"residual", "asterisk_edge_buffer_uncleared",
 				"edge_buffer_budget_ms", edgeBudgetMs,
 				"channel_interface", "dinesh_audiosocket_binary_ws",
+				"pending_dropped", dropped,
 			)
 		}
 		return nil
 	}
 	data, err := e.serializer.Clear(session.StreamSID)
 	if err != nil {
+		if e.logger != nil {
+			e.logger.Warn("barge-in: carrier clear serialize failed",
+				"stream_sid", session.StreamSID,
+				"error", err,
+				"residual", "asterisk_edge_buffer_uncleared",
+				"edge_buffer_budget_ms", edgeBudgetMs,
+				"pending_dropped", dropped,
+			)
+		}
 		return err
 	}
-	session.EnqueueOutbound(data, false)
+	if len(data) == 0 {
+		if e.logger != nil {
+			e.logger.Warn("barge-in: carrier clear returned empty frame",
+				"stream_sid", session.StreamSID,
+				"residual", "asterisk_edge_buffer_uncleared",
+				"edge_buffer_budget_ms", edgeBudgetMs,
+				"pending_dropped", dropped,
+			)
+		}
+		return nil
+	}
+	// Text control frame (ready/clear/end_of_call) — not binary PCM.
+	session.EnqueueControl(data)
+	if e.logger != nil {
+		// Post-flush residual is TCP + Asterisk internal only (local pacer cleared).
+		e.logger.Info("barge-in: carrier clear sent",
+			"stream_sid", session.StreamSID,
+			"pending_dropped", dropped,
+			"edge_buffer_budget_ms", 40, // post-flush: ~1–2 frames TCP/Asterisk internal
+			"residual", "tcp_asterisk_internal_only",
+		)
+	}
 	return nil
 }
 

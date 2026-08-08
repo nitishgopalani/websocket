@@ -40,7 +40,9 @@ func (c CarrierConfig) Profile() CarrierProfile {
 			EgressSampleRate:      24000,
 			EgressBytesPerSample:  2,
 			RequiresMarkEcho:      false,
-			BargeInFlushSupported: false,
+			// Connector MsgClear drains toAst; residual after successful send is
+			// TCP + Asterisk internal only (not our local pacer).
+			BargeInFlushSupported: true,
 		}
 	default:
 		return CarrierProfile{

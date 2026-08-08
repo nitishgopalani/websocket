@@ -547,7 +547,7 @@ func resolveBrainLocale(session *media.Session) string {
 
 // phoneFromStreamSID extracts the caller's 10-digit number embedded as the
 // trailing digits of the stream SID (e.g. "...-e69810587857" -> "9810587857").
-// Asterisk sends empty customer_phone, so this is the only reliable source.
+// Last-resort only — healthy Asterisk calls must send customer_phone in session_start.
 func phoneFromStreamSID(streamSID string) string {
 	if streamSID == "" {
 		return ""
@@ -583,6 +583,7 @@ func buildBorrowerContext(session *media.Session) *BorrowerContextPayload {
 		Language:     sessionParam(session, "language", ""),
 	}
 	phone := sessionParam(session, "customer_phone", "")
+	fallback := ""
 	if phone == "" {
 		phone = sessionParam(session, "phone", "")
 	}
@@ -590,15 +591,21 @@ func buildBorrowerContext(session *media.Session) *BorrowerContextPayload {
 		phone = sessionParam(session, "borrower_phone", "")
 	}
 	if phone == "" {
-		phone = sessionParam(session, "call_sid", "")
-	}
-	if phone == "" && session.CallSID != "" {
-		phone = session.CallSID
+		// Stream-SID digit embed is a last-resort fallback only.
+		phone = phoneFromStreamSID(session.StreamSID)
+		if phone != "" {
+			fallback = "stream_sid"
+		}
 	}
 	if phone == "" {
-		// Asterisk sends empty customer_phone; the dialer embeds the caller's
-		// 10-digit number as the trailing digits of the stream SID.
-		phone = phoneFromStreamSID(session.StreamSID)
+		fallback = "empty"
+	}
+	if fallback != "" {
+		slog.Default().Warn("phone_fallback_used",
+			"stream_sid", session.StreamSID,
+			"fallback", fallback,
+			"call_sid", session.CallSID,
+		)
 	}
 	if phone != "" {
 		ctx.Phone = phone

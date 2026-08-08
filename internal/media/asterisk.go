@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 )
 
 // Dinesh / Asterisk binary-PCM16 WebSocket protocol (text control + binary audio).
@@ -11,6 +12,7 @@ const (
 	AsteriskMsgSessionStart = "session_start"
 	AsteriskMsgSessionEnd   = "session_end"
 	AsteriskMsgReady        = "ready"
+	AsteriskMsgClear        = "clear"
 	AsteriskMsgEndOfCall    = "end_of_call"
 	AsteriskMsgError        = "error"
 )
@@ -122,10 +124,20 @@ func AsteriskStartToStartEvent(s AsteriskSessionStart) StartEvent {
 	}
 	params["asr_language"] = ResolveSessionASRLanguage(params, nil, s.SessionID)
 
+	// CallSID is the telephony call id when present in metadata; do not alias
+	// it to customer_phone (empty Asterisk phones previously poisoned CallSID).
+	callSID := strings.TrimSpace(params["call_sid"])
+	if callSID == "" {
+		callSID = strings.TrimSpace(params["asterisk_channel_id"])
+	}
+	if callSID == "" {
+		callSID = s.SessionID
+	}
+
 	return StartEvent{
 		Event:     EventStart,
 		StreamSID: s.SessionID,
-		CallSID:   s.CustomerPhone,
+		CallSID:   callSID,
 		MediaFormat: AudioFormat{
 			Encoding:   "audio/x-l16",
 			SampleRate: inRate,
@@ -133,6 +145,11 @@ func AsteriskStartToStartEvent(s AsteriskSessionStart) StartEvent {
 		},
 		CustomParameters: params,
 	}
+}
+
+// AsteriskClearMessage returns the barge-in flush control JSON.
+func AsteriskClearMessage() ([]byte, error) {
+	return json.Marshal(map[string]string{"type": AsteriskMsgClear})
 }
 
 // AsteriskReadyMessage returns the ready control JSON.

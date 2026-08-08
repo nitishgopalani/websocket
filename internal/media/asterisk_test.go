@@ -37,6 +37,16 @@ func TestParseAsteriskSessionStart(t *testing.T) {
 	if start.CustomParameters["asr_language"] != "en-IN" {
 		t.Fatalf("asr_language=%q", start.CustomParameters["asr_language"])
 	}
+	if start.CustomParameters["customer_phone"] != "+911234567890" {
+		t.Fatalf("customer_phone=%q", start.CustomParameters["customer_phone"])
+	}
+	// CallSID must not be aliased to customer_phone.
+	if start.CallSID == "+911234567890" || start.CallSID == start.CustomParameters["customer_phone"] {
+		t.Fatalf("CallSID aliased to phone: %q", start.CallSID)
+	}
+	if start.CallSID != "sess-1" {
+		t.Fatalf("CallSID=%q, want session_id fallback", start.CallSID)
+	}
 }
 
 func TestAsteriskSerializerControlMessages(t *testing.T) {
@@ -72,7 +82,25 @@ func TestCarrierAsteriskProfile(t *testing.T) {
 	if p.InputSampleRate != 16000 || p.EgressSampleRate != 24000 {
 		t.Fatalf("rates in=%d out=%d", p.InputSampleRate, p.EgressSampleRate)
 	}
-	if p.RequiresMarkEcho || p.BargeInFlushSupported {
-		t.Fatal("asterisk should not use mark echo or carrier flush")
+	if p.RequiresMarkEcho {
+		t.Fatal("asterisk should not use mark echo")
+	}
+	if !p.BargeInFlushSupported {
+		t.Fatal("asterisk should support clear flush via MsgClear")
+	}
+}
+
+func TestAsteriskSerializerClearFrame(t *testing.T) {
+	ser := media.AsteriskSerializer{}
+	raw, err := ser.Clear("sess")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]string
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	if m["type"] != media.AsteriskMsgClear {
+		t.Fatalf("clear type=%q want clear", m["type"])
 	}
 }
