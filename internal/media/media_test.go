@@ -135,6 +135,36 @@ func TestHealthz(t *testing.T) {
 	}
 }
 
+func TestVersionEndpoint(t *testing.T) {
+	media.GitSHA = "deadbeef"
+	media.GitBranch = "release/uat-voice-stack"
+	t.Cleanup(func() { media.GitSHA = ""; media.GitBranch = "" })
+
+	cfg := media.DefaultConfig()
+	srv := media.NewServer(cfg, nil, func() media.AudioSink { return newRecordingSink() }, nil)
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+
+	resp, err := http.Get(ts.URL + "/version")
+	if err != nil {
+		t.Fatalf("GET /version: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var info map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if info["git_sha"] != "deadbeef" {
+		t.Fatalf("git_sha = %q, want deadbeef", info["git_sha"])
+	}
+	if info["git_branch"] != "release/uat-voice-stack" {
+		t.Fatalf("git_branch = %q, want release/uat-voice-stack", info["git_branch"])
+	}
+}
+
 func TestFullStreamLifecycle(t *testing.T) {
 	cfg := media.DefaultConfig()
 	sink := newRecordingSink()

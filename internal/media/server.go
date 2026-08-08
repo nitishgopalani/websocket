@@ -40,6 +40,7 @@ func NewServer(cfg Config, logger *slog.Logger, newSink func() AudioSink, metric
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	mux.HandleFunc("GET /version", HandleVersion)
 	if metrics != nil && metrics.Enabled() {
 		mux.Handle("GET /metrics", metrics.Handler())
 	}
