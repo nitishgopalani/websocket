@@ -46,6 +46,14 @@ func main() {
 			cfg.FrameDurationMs = v
 		}
 	}
+	// DEBT-040: ingress audioCh capacity. The default 8 (160ms) was too
+	// small for the session-start ingress burst (37 drops ≈ 740ms of caller
+	// audio lost before the sink chain drained). 64 (1.28s) absorbs the burst.
+	if v := os.Getenv("AUDIO_BUFFER_SIZE"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.AudioBufferSize = n
+		}
+	}
 	if carrierProfile.Variant == media.CarrierAsterisk && os.Getenv("TTS_OUTPUT_FORMAT") == "" {
 		// Per-session output_sample_rate from session_start selects pcm_16000 vs pcm_24000.
 		ttsCfg.OutputFormat = ""

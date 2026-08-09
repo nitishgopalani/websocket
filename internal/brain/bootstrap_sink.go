@@ -3,9 +3,27 @@ package brain
 import (
 	"context"
 	"log/slog"
+	"os"
+	"strconv"
+	"time"
 
 	"websocket/internal/media"
 )
+
+// defaultDrainReadyTimeoutMs is the fallback that auto-releases the egress
+// drain-ready gate (DEBT-040) if no ingress frame ever arrives — prevents
+// a misconfigured/late Asterisk bridge from deadlocking the call into
+// silence. 2000ms covers the observed SIP-answer + bridge-create latency.
+const defaultDrainReadyTimeoutMs = 2000
+
+func drainReadyTimeoutFromEnv() int {
+	if v := os.Getenv("DRAIN_READY_TIMEOUT_MS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 0
+}
 
 func isTapOnlySession(session *media.Session) bool {
 	if session == nil || session.Params == nil {
@@ -53,6 +71,41 @@ func (s *BootstrapSink) OnStart(ctx context.Context, session *media.Session) err
 	if s.CarrierEgress != nil {
 		if s.AMDEnabled {
 			s.CarrierEgress.EnableHumanGate()
+		} else {
+			// DEBT-040: when AMD is off, the opener TTS burst fires inside
+			// OnStart with no egress gate. The Asterisk bridge may not be
+			// draining yet → opener audio clipped (~740ms in live session
+			// 0cc56de1). Gate the pacer until the first ingress frame
+			// (Asterisk is sending = bridge is live); pendingFrames holds
+			// the burst during the wait. A timeout fallback auto-resumes
+			// if no ingress frame ever arrives (avoids a silent deadlock).
+			s.CarrierEgress.EnableDrainReadyGate()
+			_drainTimeout := defaultDrainReadyTimeoutMs
+			if v := drainReadyTimeoutFromEnv(); v > 0 {
+				_drainTimeout = v
+			}
+			_session := session
+			_egress := s.CarrierEgress
+			_logger := s.Logger
+			_session.SetDrainReadyCallback(func() {
+				_egress.ConfirmDrainReady()
+				if _logger != nil {
+					_logger.Info("egress drain-ready gate released on first ingress frame",
+						"stream_sid", _session.StreamSID,
+					)
+				}
+			})
+			time.AfterFunc(time.Duration(_drainTimeout)*time.Millisecond, func() {
+				if _egress.DrainReadyGated() {
+					_egress.ConfirmDrainReady()
+					if _logger != nil {
+						_logger.Warn("egress drain-ready gate auto-released on timeout",
+							"stream_sid", _session.StreamSID,
+							"timeout_ms", _drainTimeout,
+						)
+					}
+				}
+			})
 		}
 		s.CarrierEgress.BindSession(session)
 	}

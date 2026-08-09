@@ -91,6 +91,17 @@ type CarrierEgress struct {
 	supersedeCount  int64
 	egressMarked    map[string]bool
 	humanGated      bool
+	// DEBT-040: drain-ready gate. The egress pacer starts on BindSession but
+	// the Asterisk bridge may not be draining yet (audiosocket accept / bridge
+	// create still pending). Without a gate, the opener TTS burst is written
+	// before Asterisk is listening → opener audio clipped (~740ms in live
+	// session 0cc56de1). The drain-ready gate pauses the pacer until the
+	// first binary ingress frame arrives (Asterisk is sending = bridge is
+	// live), then resumes. pendingFrames (unbounded) holds the burst during
+	// the wait. A timeout fallback (drainReadyTimeoutMs) auto-resumes if no
+	// ingress frame ever arrives, so a misconfigured/late bridge can never
+	// deadlock the call into silence.
+	drainReadyGated bool
 }
 
 // NewCarrierEgress constructs carrier egress with injectable clock for deterministic tests.
@@ -162,6 +173,43 @@ func (e *CarrierEgress) HumanGated() bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.humanGated
+}
+
+// EnableDrainReadyGate blocks outbound audio until ConfirmDrainReady (DEBT-040).
+// Mirrors EnableHumanGate but triggers on the first binary ingress frame
+// (Asterisk is sending = bridge is live) instead of AMD human confirmation.
+// Idempotent; no-op if the human gate is already active (AMD owns the pause).
+func (e *CarrierEgress) EnableDrainReadyGate() {
+	e.mu.Lock()
+	if e.humanGated {
+		// AMD human gate already owns the pause; don't double-gate.
+		e.mu.Unlock()
+		return
+	}
+	e.drainReadyGated = true
+	e.paused = true
+	e.mu.Unlock()
+}
+
+// ConfirmDrainReady releases the drain-ready gate and resumes paced egress.
+// Idempotent; no-op if the gate was never enabled or already released.
+func (e *CarrierEgress) ConfirmDrainReady() {
+	e.mu.Lock()
+	if !e.drainReadyGated {
+		e.mu.Unlock()
+		return
+	}
+	e.drainReadyGated = false
+	e.mu.Unlock()
+	e.Resume()
+}
+
+// DrainReadyGated reports whether egress is waiting for the first ingress
+// frame (drain-ready gate).
+func (e *CarrierEgress) DrainReadyGated() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.drainReadyGated
 }
 
 // SetObservability attaches CT-12 timing and watchdog hooks.

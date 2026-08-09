@@ -47,6 +47,12 @@ type Session struct {
 	metrics          *Metrics
 	wg               sync.WaitGroup
 	outboundOnce     sync.Once
+	// DEBT-040: drain-ready gate callback. Fired once on the first
+	// successful ingress frame (enqueueRawMedia) to release the egress
+	// pacer pause — Asterisk is sending = bridge is live = safe to start
+	// egressing the opener TTS burst. Set by BootstrapSink.OnStart.
+	drainReadyCb     func()
+	drainReadyOnce   sync.Once
 }
 
 // outboundFrame is one queued carrier websocket message for the single outbound writer.
@@ -54,6 +60,14 @@ type outboundFrame struct {
 	data    []byte
 	isAudio bool
 	binary  bool
+}
+
+// SetDrainReadyCallback registers a one-shot callback fired on the first
+// successful ingress frame (DEBT-040 drain-ready gate). Used by
+// BootstrapSink.OnStart to release the egress pacer pause once Asterisk is
+// sending (bridge is live).
+func (s *Session) SetDrainReadyCallback(cb func()) {
+	s.drainReadyCb = cb
 }
 
 // FramesDropped returns the number of audio frames dropped due to backpressure.
@@ -468,6 +482,7 @@ func (s *Session) enqueueRawMedia(ctx context.Context, frame []byte) error {
 	atomic.AddInt64(&s.FramesIn, 1)
 	select {
 	case s.audioCh <- frame:
+		s.fireDrainReady()
 		return nil
 	default:
 		select {
@@ -481,6 +496,7 @@ func (s *Session) enqueueRawMedia(ctx context.Context, frame []byte) error {
 		}
 		select {
 		case s.audioCh <- frame:
+			s.fireDrainReady()
 			return nil
 		case <-s.stopCh:
 			return fmt.Errorf("%w: %s", ErrSessionNotFound, s.StreamSID)
@@ -488,6 +504,17 @@ func (s *Session) enqueueRawMedia(ctx context.Context, frame []byte) error {
 			return ctx.Err()
 		}
 	}
+}
+
+// fireDrainReady releases the egress drain-ready gate once, on the first
+// successful ingress frame (DEBT-040). Idempotent via sync.Once; no-op if no
+// callback was registered (e.g. AMD human-gate owns the pause, or the gate
+// was disabled).
+func (s *Session) fireDrainReady() {
+	if s.drainReadyCb == nil {
+		return
+	}
+	s.drainReadyOnce.Do(s.drainReadyCb)
 }
 
 // SendEndOfCall enqueues an Asterisk end_of_call control frame.

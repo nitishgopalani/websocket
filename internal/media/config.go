@@ -6,7 +6,7 @@ const (
 	defaultListenAddr            = ":8080"
 	defaultWSPath                = "/stream"
 	defaultMaxConcurrentSessions = 1000
-	defaultAudioBufferSize       = 8
+	defaultAudioBufferSize       = 64
 	defaultTargetSampleRate      = 8000
 	defaultFrameDurationMs       = 20
 	defaultReadTimeout           = 60 * time.Second
