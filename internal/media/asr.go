@@ -16,7 +16,12 @@ const (
 	defaultASRKeepalivePeriod = 25 * time.Second
 	defaultASRReconnectBase   = 1 * time.Second
 	defaultASRReconnectMax    = 30 * time.Second
-	defaultASRMaxReconnects   = 5
+	// DEBT-028 D2: bump retry budget 5 -> 8 (maxDials = 1 + MaxReconnects = 9) so
+	// transient Sarvam WS blips survive longer before the W1-B H2 dead-air apology
+	// fires. Does NOT help when Sarvam closes with "Credits exhausted" (that is a
+	// billing issue, not a network blip) — but for real network drops this gives
+	// the session more runway to reconnect transparently.
+	defaultASRMaxReconnects   = 8
 	defaultASREventBuffer     = 64
 	defaultASRReconnectBuffer = 8
 )

@@ -452,6 +452,10 @@ func (s *sarvamSession) tryReconnect(ctx context.Context) {
 	}
 	s.mu.Unlock()
 
+	// DEBT-028 D2: log the total reconnect duration (from first attempt to
+	// success/giveUp) so latency forensics can correlate ASR gaps with turn loss.
+	reconnectStartedAt := time.Now()
+
 	maxAttempts := s.maxReconnects()
 	for {
 		select {
@@ -467,11 +471,12 @@ func (s *sarvamSession) tryReconnect(ctx context.Context) {
 		failN := int(s.reconnectFails.Load())
 		if failN >= maxAttempts {
 			s.reconnectGiveUp.Store(true)
-			s.logger.Error("sarvam reconnect exhausted; giving up",
-				"stream_sid", s.meta.StreamSID,
-				"attempts", failN,
-				"dials", s.dialCount.Load(),
-			)
+		s.logger.Error("sarvam reconnect exhausted; giving up",
+			"stream_sid", s.meta.StreamSID,
+			"attempts", failN,
+			"dials", s.dialCount.Load(),
+			"reconnect_ms", time.Since(reconnectStartedAt).Milliseconds(),
+		)
 			// W1-B.1 (H2 dead-air defense): emit a terminal ASREventDead (not
 			// just ASREventError) so the sink can branch on terminality — speak
 			// the tenant apology line via TTS, log asr_dead=true, clean-close.
@@ -493,12 +498,13 @@ func (s *sarvamSession) tryReconnect(ctx context.Context) {
 			if err != nil {
 				s.reconnectFails.Add(1)
 				s.mu.Unlock()
-				s.logger.Warn("sarvam reconnect failed",
-					"stream_sid", s.meta.StreamSID,
-					"attempt", failN+1,
-					"dials", s.dialCount.Load(),
-					"error", err,
-				)
+			s.logger.Warn("sarvam reconnect failed",
+				"stream_sid", s.meta.StreamSID,
+				"attempt", failN+1,
+				"dials", s.dialCount.Load(),
+				"reconnect_ms", time.Since(reconnectStartedAt).Milliseconds(),
+				"error", err,
+			)
 			if s.reconnectGiveUp.Load() {
 				// W1-B.1: dialCount-exhaustion path (connectLocked set
 				// reconnectGiveUp). This is terminal — emit ASREventDead so the
@@ -514,6 +520,7 @@ func (s *sarvamSession) tryReconnect(ctx context.Context) {
 				"stream_sid", s.meta.StreamSID,
 				"reconnects", s.Reconnects(),
 				"dials", s.dialCount.Load(),
+				"reconnect_ms", time.Since(reconnectStartedAt).Milliseconds(),
 			)
 			s.mu.Unlock()
 			return
