@@ -22,14 +22,18 @@ type sarvamDial func(ctx context.Context, wsURL string, header http.Header) (*we
 
 // SarvamASRProvider opens persistent Sarvam streaming STT sessions.
 type SarvamASRProvider struct {
-	apiKey string
-	cfg    SarvamConfig
-	dial   sarvamDial
-	logger *slog.Logger
+	apiKey         string
+	apiKeyFallback string // DEBT-028: SARVAM_API_KEY_FALLBACK — retry once on credit/auth-class close
+	cfg            SarvamConfig
+	dial           sarvamDial
+	logger         *slog.Logger
 }
 
 // NewSarvamASRProvider constructs a Sarvam ASR provider.
-func NewSarvamASRProvider(apiKey string, cfg SarvamConfig, logger *slog.Logger) *SarvamASRProvider {
+// apiKeyFallback may be empty (no fallback). When set, a credit/auth-class
+// WS close (1003 / 4xx / "credits" / "subscription" / "auth") triggers a
+// one-time retry with the fallback key, logged as key_used=fallback.
+func NewSarvamASRProvider(apiKey string, apiKeyFallback string, cfg SarvamConfig, logger *slog.Logger) *SarvamASRProvider {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -37,10 +41,11 @@ func NewSarvamASRProvider(apiKey string, cfg SarvamConfig, logger *slog.Logger) 
 		cfg.Endpoint = defaultSarvamEndpoint
 	}
 	return &SarvamASRProvider{
-		apiKey: apiKey,
-		cfg:    cfg,
-		dial:   defaultSarvamDial,
-		logger: logger,
+		apiKey:         apiKey,
+		apiKeyFallback: apiKeyFallback,
+		cfg:            cfg,
+		dial:           defaultSarvamDial,
+		logger:         logger,
 	}
 }
 
@@ -58,6 +63,8 @@ func (p *SarvamASRProvider) Open(ctx context.Context, meta ASRSessionMeta) (ASRS
 		meta:     meta,
 		cfg:      p.cfg,
 		apiKey:   p.apiKey,
+		apiKeyFallback: p.apiKeyFallback,
+		keyUsed:  "primary",
 		dial:     p.dial,
 		logger:   p.logger,
 		events:   make(chan ASREvent, defaultASREventBuffer),
@@ -74,6 +81,11 @@ type sarvamSession struct {
 	meta     ASRSessionMeta
 	cfg      SarvamConfig
 	apiKey   string
+	// DEBT-028: fallback key for credit/auth-class WS close. When non-empty
+	// and keyUsed=="primary", a credit/auth close swaps s.apiKey to the
+	// fallback, resets reconnectFails (fresh budget), and retries once.
+	apiKeyFallback string
+	keyUsed        string // "primary" | "fallback"
 	dial     sarvamDial
 	logger   *slog.Logger
 
@@ -239,6 +251,7 @@ func (s *sarvamSession) connectLocked(ctx context.Context) error {
 		"language_code", lang,
 		"url", maskSarvamWSURL(wsURL),
 		"query", queryLog,
+		"key_used", s.keyUsed,
 	)
 
 	header := http.Header{}
@@ -246,6 +259,11 @@ func (s *sarvamSession) connectLocked(ctx context.Context) error {
 
 	conn, _, err := s.dial(ctx, wsURL, header)
 	if err != nil {
+		// DEBT-028: dial failure may be a credit/auth-class rejection
+		// (e.g. 401/403 on the HTTP upgrade). Try the fallback key once.
+		if s.maybeSwapToFallbackLocked(err, 0, "") {
+			return fmt.Errorf("sarvam dial: %w (will retry with fallback key)", err)
+		}
 		return fmt.Errorf("sarvam dial: %w", err)
 	}
 
@@ -257,6 +275,7 @@ func (s *sarvamSession) connectLocked(ctx context.Context) error {
 		"stream_sid", s.meta.StreamSID,
 		"dial", dialN,
 		"order", "connect->send_audio (no separate config frame; params in query string)",
+		"key_used", s.keyUsed,
 	)
 
 	for _, frame := range buf {
@@ -375,29 +394,35 @@ func (s *sarvamSession) readLoop() {
 				return
 			default:
 			}
-			closeCode, closeReason := extractCloseInfo(err)
-			normalClose := websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway)
-			if normalClose {
-				s.logger.Info("sarvam ws closed",
-					"stream_sid", s.meta.StreamSID,
-					"close_code", closeCode,
-					"close_reason", closeReason,
-				)
-			} else {
-				s.logger.Warn("sarvam read ended; scheduling reconnect",
-					"stream_sid", s.meta.StreamSID,
-					"close_code", closeCode,
-					"close_reason", closeReason,
-					"error", err,
-				)
-			}
-			s.mu.Lock()
-			_ = s.closeConnLocked()
-			hasBuf := len(s.reconnectBuf) > 0
-			s.mu.Unlock()
-			if !normalClose || hasBuf {
-				s.scheduleReconnect(context.Background())
-			}
+		closeCode, closeReason := extractCloseInfo(err)
+		normalClose := websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway)
+		if normalClose {
+			s.logger.Info("sarvam ws closed",
+				"stream_sid", s.meta.StreamSID,
+				"close_code", closeCode,
+				"close_reason", closeReason,
+				"key_used", s.keyUsed,
+			)
+		} else {
+			s.logger.Warn("sarvam read ended; scheduling reconnect",
+				"stream_sid", s.meta.StreamSID,
+				"close_code", closeCode,
+				"close_reason", closeReason,
+				"key_used", s.keyUsed,
+				"error", err,
+			)
+		}
+		// DEBT-028: on a credit/auth-class close, swap to the fallback key
+		// (one-time) and reset the reconnect budget so the fallback gets a
+		// fresh run. The reconnect loop will then dial with the fallback key.
+		s.mu.Lock()
+		swapped := s.maybeSwapToFallbackLocked(err, closeCode, closeReason)
+		_ = s.closeConnLocked()
+		hasBuf := len(s.reconnectBuf) > 0
+		s.mu.Unlock()
+		if !normalClose || hasBuf || swapped {
+			s.scheduleReconnect(context.Background())
+		}
 			select {
 			case <-s.done:
 				return
@@ -554,6 +579,64 @@ func backoffDelay(base, max time.Duration, attempt int) time.Duration {
 		}
 	}
 	return delay + jitter(max/5)
+}
+
+// isCreditAuthClose reports whether a WS close / dial error is credit or
+// auth-class (i.e. swapping to a fallback key might help). Triggers:
+//   - close_code 1003 (unsupported data) — Sarvam "Credits exhausted" sends this.
+//   - close_code 1000 (normal) WITH a reason mentioning credits/subscription.
+//   - close_code in the 4xxx range (policy violation / auth) — Sarvam auth rejects.
+//   - dial error mentioning auth/credit/subscription/key (HTTP 401/403 upgrade).
+func isCreditAuthClose(closeCode int, closeReason string, err error) bool {
+	if closeCode == 1003 {
+		return true
+	}
+	if closeCode >= 4000 && closeCode <= 4999 {
+		return true
+	}
+	combined := strings.ToLower(closeReason + " " + errToString(err))
+	for _, marker := range []string{"credit", "subscription", "auth", "unauthor", "forbidden", "api key", "apikey"} {
+		if strings.Contains(combined, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func errToString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+// maybeSwapToFallbackLocked swaps s.apiKey to the fallback key (one-time)
+// when the close/dial error is credit/auth-class AND a fallback is
+// configured AND we're still on the primary key. Resets reconnectFails so
+// the fallback gets a fresh reconnect budget. Returns true iff it swapped.
+// Caller MUST hold s.mu.
+func (s *sarvamSession) maybeSwapToFallbackLocked(err error, closeCode int, closeReason string) bool {
+	if s.apiKeyFallback == "" {
+		return false
+	}
+	if s.keyUsed != "primary" {
+		return false
+	}
+	if !isCreditAuthClose(closeCode, closeReason, err) {
+		return false
+	}
+	s.apiKey = s.apiKeyFallback
+	s.keyUsed = "fallback"
+	s.reconnectFails.Store(0)
+	s.reconnectGiveUp.Store(false)
+	s.logger.Warn("sarvam credit/auth close; swapping to fallback key",
+		"stream_sid", s.meta.StreamSID,
+		"close_code", closeCode,
+		"close_reason", closeReason,
+		"key_used", "fallback",
+		"error", err,
+	)
+	return true
 }
 
 func jitter(max time.Duration) time.Duration {

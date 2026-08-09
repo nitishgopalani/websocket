@@ -65,6 +65,8 @@ func shouldFallbackV3ToV2(model string, status int, transportErr error) bool {
 func sarvamTTSConfigFromEnv(cfg TTSConfig) TTSConfig {
 	cfg.Provider = "sarvam"
 	cfg.APIKey = strings.TrimSpace(os.Getenv("SARVAM_API_KEY"))
+	// DEBT-028: optional fallback key for credit/auth-class WS close.
+	cfg.APIKeyFallback = strings.TrimSpace(os.Getenv("SARVAM_API_KEY_FALLBACK"))
 
 	cfg.VoiceID = defaultSarvamTTSSpeaker
 	if v := strings.TrimSpace(os.Getenv("SARVAM_TTS_SPEAKER")); v != "" {
@@ -97,7 +99,8 @@ func sarvamTTSPaceFromEnv() *float64 {
 // Unlike ElevenLabs (WebSocket streaming) this is request/response: each Speak call
 // POSTs the full utterance and emits the returned PCM16 audio as chunks.
 type SarvamTTSProvider struct {
-	apiKey  string
+	apiKey         string
+	apiKeyFallback string // DEBT-028: SARVAM_API_KEY_FALLBACK — retry once on credit/auth-class WS close
 	baseURL string
 	model   string
 	speaker string
@@ -131,7 +134,8 @@ func NewSarvamTTSProvider(cfg TTSConfig) (*SarvamTTSProvider, error) {
 		lang = lang + "-IN" // normalise "hi" -> "hi-IN"
 	}
 	return &SarvamTTSProvider{
-		apiKey:  cfg.APIKey,
+		apiKey:         cfg.APIKey,
+		apiKeyFallback: cfg.APIKeyFallback,
 		baseURL: base,
 		model:   model,
 		speaker: speaker,

@@ -76,6 +76,8 @@ type TTSConfig struct {
 	Enabled  bool
 	Provider string // "elevenlabs" (default) or "sarvam"
 	APIKey   string
+	// DEBT-028: SARVAM_API_KEY_FALLBACK — retry once on credit/auth-class WS close.
+	APIKeyFallback string
 	// For Sarvam, VoiceID holds the speaker name (e.g. "abhilash") and Model the
 	// model id (e.g. "bulbul:v2").
 	VoiceID        string

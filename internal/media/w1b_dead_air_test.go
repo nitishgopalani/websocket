@@ -1,4 +1,4 @@
-package media
+﻿package media
 
 import (
 	"context"
@@ -13,7 +13,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// W1-B.1 / W1-B.2 / W1-B.5 — H2 dead-air defense tests.
+// W1-B.1 / W1-B.2 / W1-B.5 â€” H2 dead-air defense tests.
 
 // fakeASRProvider pipes canned events into a session's Events channel.
 type fakeASRProvider struct {
@@ -38,12 +38,12 @@ func (s *fakeASRSession) Close() error {
 // W1-B.1: ASR reconnect exhausted emits ASREventDead (terminal, not just error).
 
 func TestSarvamReconnectExhaustedEmitsDeadEvent(t *testing.T) {
-	// Use a provider whose dial always fails → connectLocked fails on every
-	// attempt → reconnectFails increments → after MaxReconnects fails, giveUp
+	// Use a provider whose dial always fails â†’ connectLocked fails on every
+	// attempt â†’ reconnectFails increments â†’ after MaxReconnects fails, giveUp
 	// and emit ASREventDead (the failN path). This is faster and more robust
 	// than a dropping-conn server (which lets dial succeed, hitting the
 	// dialCount path with a 500ms readLoop sleep between cycles).
-	provider := NewSarvamASRProvider("test-key", SarvamConfig{
+	provider := NewSarvamASRProvider("test-key", "", SarvamConfig{
 		Endpoint:           "ws://127.0.0.1:1/unreachable",
 		Model:              "saaras:v3",
 		Mode:               "transcribe",
@@ -66,7 +66,7 @@ func TestSarvamReconnectExhaustedEmitsDeadEvent(t *testing.T) {
 	defer sess.Close()
 
 	// Kick the lazy dial + reconnect loop. The first SendAudio returns the
-	// dial error (buffered while disconnected); that's expected — ignore it.
+	// dial error (buffered while disconnected); that's expected â€” ignore it.
 	_ = sess.SendAudio([]byte{0x01, 0x00})
 
 	deadline := time.Now().Add(4 * time.Second)
@@ -148,7 +148,7 @@ func TestASRSinkDeadEventLoggedWithoutListener(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// W1-B.2: TTS speak-fail ×2 → apology + graceful close
+// W1-B.2: TTS speak-fail Ã—2 â†’ apology + graceful close
 // ---------------------------------------------------------------------------
 
 type failingTTSStream struct {
@@ -192,22 +192,22 @@ func (f *failingTTSStream) Close() error {
 }
 
 func TestTTSConsecutiveSpeakFailTriggersApologyAndClose(t *testing.T) {
-	tts := newFailingTTSStream() // failFirstN=-1 → always fail
+	tts := newFailingTTSStream() // failFirstN=-1 â†’ always fail
 	var endCallCalls atomic.Int32
 	c := NewTTSReplyConsumer(tts, NewLoggingEgress(nil), nil, func(_ context.Context, _ *Session) {
 		endCallCalls.Add(1)
 	}, nil)
-	c.SetHoldingLine("कृपया बनी रहिए।")
-	c.SetApologyLine("माफ़ कीजिए, लाइन में तकनीकी समस्या आ रही है।", "abhilash")
+	c.SetHoldingLine("à¤•à¥ƒà¤ªà¤¯à¤¾ à¤¬à¤¨à¥€ à¤°à¤¹à¤¿à¤à¥¤")
+	c.SetApologyLine("à¤®à¤¾à¤«à¤¼ à¤•à¥€à¤œà¤¿à¤, à¤²à¤¾à¤‡à¤¨ à¤®à¥‡à¤‚ à¤¤à¤•à¤¨à¥€à¤•à¥€ à¤¸à¤®à¤¸à¥à¤¯à¤¾ à¤† à¤°à¤¹à¥€ à¤¹à¥ˆà¥¤", "abhilash")
 
 	session := &Session{StreamSID: "FAIL-SINK", CallSID: "CALL-2"}
 	ctx := context.Background()
 
-	// 1st non-empty Speak fails → holding-line Speak also fails (always-fail
-	// stream) → apology path → apology Speak fails (recursion guard) → close.
+	// 1st non-empty Speak fails â†’ holding-line Speak also fails (always-fail
+	// stream) â†’ apology path â†’ apology Speak fails (recursion guard) â†’ close.
 	// On a fully-dead TTS the call closes immediately; the recursion guard
 	// prevents infinite apology retries.
-	c.OnReplyChunk(ctx, session, "turn-1", 0, "आपका भुगतान 4500 रुपये है।")
+	c.OnReplyChunk(ctx, session, "turn-1", 0, "à¤†à¤ªà¤•à¤¾ à¤­à¥à¤—à¤¤à¤¾à¤¨ 4500 à¤°à¥à¤ªà¤¯à¥‡ à¤¹à¥ˆà¥¤")
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) && endCallCalls.Load() == 0 {
 		time.Sleep(20 * time.Millisecond)
@@ -220,18 +220,18 @@ func TestTTSConsecutiveSpeakFailTriggersApologyAndClose(t *testing.T) {
 
 func TestTTSFirstSpeakFailHoldingLineNoClose(t *testing.T) {
 	// failFirstN=1: the 1st non-empty Speak fails, the holding-line Speak
-	// (2nd call) succeeds → no escalation, no close. Counter resets on success.
+	// (2nd call) succeeds â†’ no escalation, no close. Counter resets on success.
 	tts := newFailingTTSStream()
 	tts.failFirstN = 1
 	var endCallCalls atomic.Int32
 	c := NewTTSReplyConsumer(tts, NewLoggingEgress(nil), nil, func(_ context.Context, _ *Session) {
 		endCallCalls.Add(1)
 	}, nil)
-	c.SetHoldingLine("कृपया बनी रहिए।")
-	c.SetApologyLine("माफ़ कीजिए।", "")
+	c.SetHoldingLine("à¤•à¥ƒà¤ªà¤¯à¤¾ à¤¬à¤¨à¥€ à¤°à¤¹à¤¿à¤à¥¤")
+	c.SetApologyLine("à¤®à¤¾à¤«à¤¼ à¤•à¥€à¤œà¤¿à¤à¥¤", "")
 
 	session := &Session{StreamSID: "FAIL-1"}
-	c.OnReplyChunk(context.Background(), session, "turn-1", 0, "नमस्ते।")
+	c.OnReplyChunk(context.Background(), session, "turn-1", 0, "à¤¨à¤®à¤¸à¥à¤¤à¥‡à¥¤")
 	time.Sleep(80 * time.Millisecond)
 	if endCallCalls.Load() != 0 {
 		t.Fatalf("1st failure + successful holding line should NOT close (closes=%d)", endCallCalls.Load())
@@ -246,7 +246,7 @@ func TestTTSFirstSpeakFailHoldingLineNoClose(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// W1-B.5: noop-with-text — a noop TTS stream returns nil from Speak; no escalation
+// W1-B.5: noop-with-text â€” a noop TTS stream returns nil from Speak; no escalation
 // ---------------------------------------------------------------------------
 
 func TestTTSNoopWithTextNoEscalation(t *testing.T) {
@@ -258,11 +258,11 @@ func TestTTSNoopWithTextNoEscalation(t *testing.T) {
 	c := NewTTSReplyConsumer(stream, NewLoggingEgress(nil), nil, func(_ context.Context, _ *Session) {
 		t.Error("noop-with-text must NOT close the call")
 	}, nil)
-	c.SetHoldingLine("कृपया बनी रहिए।")
-	c.SetApologyLine("माफ़ कीजिए।", "")
+	c.SetHoldingLine("à¤•à¥ƒà¤ªà¤¯à¤¾ à¤¬à¤¨à¥€ à¤°à¤¹à¤¿à¤à¥¤")
+	c.SetApologyLine("à¤®à¤¾à¤«à¤¼ à¤•à¥€à¤œà¤¿à¤à¥¤", "")
 
 	session := &Session{StreamSID: "NOOP-SINK"}
-	c.OnReplyChunk(context.Background(), session, "turn-1", 0, "यह एक noop परीक्षण है।")
+	c.OnReplyChunk(context.Background(), session, "turn-1", 0, "à¤¯à¤¹ à¤à¤• noop à¤ªà¤°à¥€à¤•à¥à¤·à¤£ à¤¹à¥ˆà¥¤")
 	c.OnReplyDone(context.Background(), session, "turn-1", false, "noop")
 	time.Sleep(500 * time.Millisecond)
 	c.mu.Lock()
@@ -276,7 +276,7 @@ func TestTTSNoopWithTextNoEscalation(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// W1-B.5: simulated ASR-WS-kill → apology audio frames are produced
+// W1-B.5: simulated ASR-WS-kill â†’ apology audio frames are produced
 // ---------------------------------------------------------------------------
 
 type capturingEgress struct {
@@ -335,7 +335,7 @@ func TestSimulatedASRWSKillProducesApologyAudioFrames(t *testing.T) {
 	c := NewTTSReplyConsumer(tts, egress, nil, func(_ context.Context, _ *Session) {
 		endCallCalls.Add(1)
 	}, nil)
-	apology := "माफ़ कीजिए, लाइन में तकनीकी समस्या आ रही है। हम आपसे थोड़ी देर में दोबारा संपर्क करेंगे। धन्यवाद।"
+	apology := "à¤®à¤¾à¤«à¤¼ à¤•à¥€à¤œà¤¿à¤, à¤²à¤¾à¤‡à¤¨ à¤®à¥‡à¤‚ à¤¤à¤•à¤¨à¥€à¤•à¥€ à¤¸à¤®à¤¸à¥à¤¯à¤¾ à¤† à¤°à¤¹à¥€ à¤¹à¥ˆà¥¤ à¤¹à¤® à¤†à¤ªà¤¸à¥‡ à¤¥à¥‹à¤¡à¤¼à¥€ à¤¦à¥‡à¤° à¤®à¥‡à¤‚ à¤¦à¥‹à¤¬à¤¾à¤°à¤¾ à¤¸à¤‚à¤ªà¤°à¥à¤• à¤•à¤°à¥‡à¤‚à¤—à¥‡à¥¤ à¤§à¤¨à¥à¤¯à¤µà¤¾à¤¦à¥¤"
 	c.SetApologyLine(apology, "abhilash")
 
 	handler := NewDeadAirHandler(c, nil)
@@ -346,11 +346,11 @@ func TestSimulatedASRWSKillProducesApologyAudioFrames(t *testing.T) {
 
 	session := &Session{StreamSID: "KILL-SINK", CallSID: "CALL-KILL"}
 	_ = sink.OnStart(context.Background(), session)
-	// Simulate the ASR WebSocket being killed → reconnect exhausted → Dead.
+	// Simulate the ASR WebSocket being killed â†’ reconnect exhausted â†’ Dead.
 	provider.events <- ASREvent{Type: ASREventDead, Err: errors.New("ws killed")}
 
-	// The apology Speak synthesizes 2 chunks → routeAudio egresses them.
-	// Then OnReplyDone(end_call=true) → final-fallback → onEndCall.
+	// The apology Speak synthesizes 2 chunks â†’ routeAudio egresses them.
+	// Then OnReplyDone(end_call=true) â†’ final-fallback â†’ onEndCall.
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		egress.mu.Lock()

@@ -1,4 +1,4 @@
-package media
+﻿package media
 
 import (
 	"context"
@@ -104,7 +104,7 @@ func TestSarvamSessionWithFakeServer(t *testing.T) {
 	})
 	defer cleanup()
 
-	provider := NewSarvamASRProvider("test-key", SarvamConfig{
+	provider := NewSarvamASRProvider("test-key", "", SarvamConfig{
 		Endpoint:           wsURL,
 		Model:              "saaras:v3",
 		Mode:               "transcribe",
@@ -178,7 +178,7 @@ func TestSarvamReconnectOnDrop(t *testing.T) {
 	})
 	defer cleanup()
 
-	provider := NewSarvamASRProvider("test-key", SarvamConfig{
+	provider := NewSarvamASRProvider("test-key", "", SarvamConfig{
 		Endpoint:           wsURL,
 		Model:              "saaras:v3",
 		Mode:               "transcribe",

@@ -1,4 +1,4 @@
-package media_test
+﻿package media_test
 
 import (
 	"context"
@@ -35,7 +35,7 @@ func TestASRSinkWithFakeSarvam(t *testing.T) {
 	wsURL, cleanup := startFakeSarvamForSink(t)
 	defer cleanup()
 
-	provider := media.NewSarvamASRProvider("test-key", media.SarvamConfig{
+	provider := media.NewSarvamASRProvider("test-key", "", media.SarvamConfig{
 		Endpoint:           wsURL,
 		Model:              "saaras:v3",
 		Mode:               "transcribe",
@@ -101,7 +101,7 @@ func TestASRSinkNoopProvider(t *testing.T) {
 }
 
 func TestASRSinkPreservesFrameLengthToProvider(t *testing.T) {
-	provider := media.NewSarvamASRProvider("test-key", media.SarvamConfig{
+	provider := media.NewSarvamASRProvider("test-key", "", media.SarvamConfig{
 		Endpoint:        startFrameCaptureServer(t),
 		Model:           "saaras:v3",
 		KeepalivePeriod: 0,

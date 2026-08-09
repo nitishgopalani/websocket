@@ -114,6 +114,11 @@ type sarvamTTSWSStream struct {
 	sampleRate int
 	wsURL      string
 	apiKey     string
+	// DEBT-028: fallback key for credit/auth-class WS close. When non-empty
+	// and keyUsed=="primary", a credit/auth close/dial-error swaps s.apiKey
+	// to the fallback and retries the dial once.
+	apiKeyFallback string
+	keyUsed        string // "primary" | "fallback"
 	dial       ttsDial
 
 	mu            sync.Mutex
@@ -191,12 +196,14 @@ func newSarvamTTSWSStream(provider *SarvamTTSProvider, meta TTSSessionMeta, samp
 		wsURL = base + "/text-to-speech/ws"
 	}
 	s := &sarvamTTSWSStream{
-		provider:   provider,
-		meta:       meta,
-		sampleRate: sampleRate,
-		wsURL:      wsURL,
-		apiKey:     provider.apiKey,
-		dial:       defaultTTSDial,
+		provider:       provider,
+		meta:           meta,
+		sampleRate:     sampleRate,
+		wsURL:          wsURL,
+		apiKey:         provider.apiKey,
+		apiKeyFallback: provider.apiKeyFallback,
+		keyUsed:        "primary",
+		dial:           defaultTTSDial,
 		inFlight:   make(map[string]*sarvamSynthesisState),
 		cancelled:  make(map[string]struct{}),
 		turnSeq:    make(map[string]int),
@@ -260,6 +267,24 @@ func (s *sarvamTTSWSStream) connect(ctx context.Context, cfg sarvamWSConfig) err
 	wsURL := s.buildWSURL()
 	conn, _, err := s.dial(ctx, wsURL, header)
 	if err != nil {
+		// DEBT-028: dial failure may be a credit/auth-class rejection
+		// (e.g. 401/403 on the HTTP upgrade). Swap to the fallback key
+		// (one-time) and retry the dial once.
+		s.mu.Lock()
+		swapped := s.maybeSwapToFallbackLocked(err, 0, "")
+		s.mu.Unlock()
+		if swapped {
+			header2 := http.Header{}
+			header2.Set("api-subscription-key", s.apiKey)
+			conn, _, err = s.dial(ctx, wsURL, header2)
+			if err == nil {
+				s.mu.Lock()
+				s.conn = conn
+				s.connConfig = cfg
+				s.mu.Unlock()
+				return s.finishConnect(cfg, conn)
+			}
+		}
 		return fmt.Errorf("sarvam ws dial: %w", err)
 	}
 
@@ -267,7 +292,12 @@ func (s *sarvamTTSWSStream) connect(ctx context.Context, cfg sarvamWSConfig) err
 	s.conn = conn
 	s.connConfig = cfg
 	s.mu.Unlock()
+	return s.finishConnect(cfg, conn)
+}
 
+// finishConnect sends the config frame and logs the session-open line.
+// Pulled out so the fallback-retry path shares it with the primary path.
+func (s *sarvamTTSWSStream) finishConnect(cfg sarvamWSConfig, conn *websocket.Conn) error {
 	if err := s.sendConfig(cfg); err != nil {
 		s.mu.Lock()
 		_ = conn.Close()
@@ -285,6 +315,7 @@ func (s *sarvamTTSWSStream) connect(ctx context.Context, cfg sarvamWSConfig) err
 		"sample_rate", cfg.sampleRate,
 		"pace", paceStr(cfg.pace),
 		"path", "ws",
+		"key_used", s.keyUsed,
 	)
 	return nil
 }
@@ -687,8 +718,12 @@ func (s *sarvamTTSWSStream) readLoop() {
 				return
 			default:
 			}
+			closeCode, closeReason := extractCloseInfo(err)
 			s.logger.Debug("sarvam ws read error",
 				"stream_sid", s.meta.StreamSID,
+				"close_code", closeCode,
+				"close_reason", closeReason,
+				"key_used", s.keyUsed,
 				"error", err,
 			)
 			s.mu.Lock()
@@ -696,6 +731,9 @@ func (s *sarvamTTSWSStream) readLoop() {
 				_ = conn.Close()
 				s.conn = nil
 			}
+			// DEBT-028: on a credit/auth-class close, swap to the fallback key
+			// (one-time) so the next Speak dials with the fallback.
+			s.maybeSwapToFallbackLocked(err, closeCode, closeReason)
 			s.mu.Unlock()
 			time.Sleep(100 * time.Millisecond)
 			continue
@@ -703,6 +741,32 @@ func (s *sarvamTTSWSStream) readLoop() {
 
 		s.handleInbound(data)
 	}
+}
+
+// maybeSwapToFallbackLocked swaps s.apiKey to the fallback key (one-time)
+// when the close/dial error is credit/auth-class AND a fallback is
+// configured AND we're still on the primary key. Returns true iff it
+// swapped. Caller MUST hold s.mu.
+func (s *sarvamTTSWSStream) maybeSwapToFallbackLocked(err error, closeCode int, closeReason string) bool {
+	if s.apiKeyFallback == "" {
+		return false
+	}
+	if s.keyUsed != "primary" {
+		return false
+	}
+	if !isCreditAuthClose(closeCode, closeReason, err) {
+		return false
+	}
+	s.apiKey = s.apiKeyFallback
+	s.keyUsed = "fallback"
+	s.logger.Warn("sarvam tts credit/auth close; swapping to fallback key",
+		"stream_sid", s.meta.StreamSID,
+		"close_code", closeCode,
+		"close_reason", closeReason,
+		"key_used", "fallback",
+		"error", err,
+	)
+	return true
 }
 
 func (s *sarvamTTSWSStream) handleInbound(data []byte) {

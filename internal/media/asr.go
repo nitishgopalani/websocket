@@ -86,6 +86,8 @@ type ASRConfig struct {
 	Enabled            bool
 	Streaming          bool // ASR_STREAMING; default true — Sarvam WS; false = Noop rollback
 	APIKey             string
+	// DEBT-028: SARVAM_API_KEY_FALLBACK — retry once on credit/auth-class WS close.
+	APIKeyFallback     string
 	Endpoint           string
 	Model              string
 	Mode               string
@@ -142,6 +144,10 @@ func ASRConfigFromEnv() ASRConfig {
 	}
 	if v := os.Getenv("SARVAM_API_KEY"); v != "" {
 		cfg.APIKey = v
+	}
+	// DEBT-028: optional fallback key — on credit/auth-class WS close, retry once with this.
+	if v := os.Getenv("SARVAM_API_KEY_FALLBACK"); v != "" {
+		cfg.APIKeyFallback = v
 	}
 	if v := os.Getenv("SARVAM_ENDPOINT"); v != "" {
 		cfg.Endpoint = v
@@ -219,7 +225,7 @@ func NewASRProvider(cfg ASRConfig) (ASRProvider, error) {
 	if cfg.APIKey == "" {
 		return nil, ErrASRNotConfigured
 	}
-	return NewSarvamASRProvider(cfg.APIKey, cfg.SarvamConfig(), nil), nil
+	return NewSarvamASRProvider(cfg.APIKey, cfg.APIKeyFallback, cfg.SarvamConfig(), nil), nil
 }
 
 // NoopASRProvider discards audio and emits no transcript events.
