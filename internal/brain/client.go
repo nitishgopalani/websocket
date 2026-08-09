@@ -325,7 +325,23 @@ func (c *Client) readSessionReady(conn *websocket.Conn, session *media.Session) 
 		"borrower_id", ready.BorrowerID,
 		"borrower_name", ready.BorrowerName,
 		"language_code", session.Params["asr_language"],
+		"apology_text_len", len(ready.ApologyText),
+		"apology_voice_id", ready.ApologyVoiceID,
 	)
+	// W1-C C0 (DEBT-026): wire the tenant apology line into the TTS reply
+	// consumer so DeadAirHandler can speak it on ASR-reconnect-exhaustion.
+	// Type-assert (the reply consumer is *TTSReplyConsumer when TTS is live;
+	// LoggingReplyConsumer otherwise — which simply has no SetApologyLine).
+	if ready.ApologyText != "" {
+		if tc, ok := c.reply.(*media.TTSReplyConsumer); ok {
+			tc.SetApologyLine(ready.ApologyText, ready.ApologyVoiceID)
+		} else if c.logger != nil {
+			c.logger.Warn("brain session_ready carried apology_text but reply consumer is not *TTSReplyConsumer",
+				"stream_sid", session.StreamSID,
+				"reply_type", fmt.Sprintf("%T", c.reply),
+			)
+		}
+	}
 	return nil
 }
 
@@ -368,8 +384,15 @@ func (c *Client) dispatchInbound(ctx context.Context, session *media.Session, da
 		c.logger.Info("brain session_ready (late)",
 			"stream_sid", session.StreamSID,
 			"language_code", m.AsrLanguage,
+			"apology_text_len", len(m.ApologyText),
 		)
 		media.ApplySessionASRLanguage(session, m.AsrLanguage, c.logger)
+		// W1-C C0: apply apology line from late session_ready too.
+		if m.ApologyText != "" {
+			if tc, ok := c.reply.(*media.TTSReplyConsumer); ok {
+				tc.SetApologyLine(m.ApologyText, m.ApologyVoiceID)
+			}
+		}
 	case ChunkMessage:
 		if c.isSuperseded(m.TurnID) {
 			return

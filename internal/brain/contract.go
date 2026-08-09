@@ -98,6 +98,14 @@ type SessionReadyPayload struct {
 	BorrowerID   string `json:"borrower_id,omitempty"`
 	BorrowerName string `json:"borrower_name,omitempty"`
 	AsrLanguage  string `json:"asr_language"`
+	// ApologyText + ApologyVoiceID (W1-C C0 / DEBT-026): the tenant's
+	// dead-air apology line + the unknown_info-register TTS voice, sent by
+	// the brain on session_ready so the go-server's DeadAirHandler can speak
+	// it via TTS before clean-close on ASR-reconnect-exhaustion. Empty =
+	// handler closes silently (no apology spoken). See PAISALO_FRAGMENT_LIBRARY
+	// §H candidate #55 (PENDING-CLIENT-APPROVAL).
+	ApologyText    string `json:"apology_text,omitempty"`
+	ApologyVoiceID string `json:"apology_voice_id,omitempty"`
 }
 
 // ChunkMessage is one TTS-able sentence chunk of the gated reply.
