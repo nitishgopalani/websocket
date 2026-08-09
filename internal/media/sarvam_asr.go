@@ -472,8 +472,12 @@ func (s *sarvamSession) tryReconnect(ctx context.Context) {
 				"attempts", failN,
 				"dials", s.dialCount.Load(),
 			)
+			// W1-B.1 (H2 dead-air defense): emit a terminal ASREventDead (not
+			// just ASREventError) so the sink can branch on terminality — speak
+			// the tenant apology line via TTS, log asr_dead=true, clean-close.
+			// Never continue deaf.
 			s.emit(ASREvent{
-				Type: ASREventError,
+				Type: ASREventDead,
 				Err:  fmt.Errorf("sarvam reconnect exhausted after %d attempts", failN),
 			})
 			return
@@ -495,11 +499,14 @@ func (s *sarvamSession) tryReconnect(ctx context.Context) {
 					"dials", s.dialCount.Load(),
 					"error", err,
 				)
-				if s.reconnectGiveUp.Load() {
-					s.emit(ASREvent{Type: ASREventError, Err: err})
-					return
-				}
-				continue
+			if s.reconnectGiveUp.Load() {
+				// W1-B.1: dialCount-exhaustion path (connectLocked set
+				// reconnectGiveUp). This is terminal — emit ASREventDead so the
+				// sink speaks the apology + clean-closes. Never continue deaf.
+				s.emit(ASREvent{Type: ASREventDead, Err: err})
+				return
+			}
+			continue
 			}
 			s.reconnects.Add(1)
 			GlobalMetrics().IncASRReconnect()

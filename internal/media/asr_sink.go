@@ -14,6 +14,14 @@ type TranscriptConsumer interface {
 	OnSpeechEnd(ctx context.Context, session *Session)
 }
 
+// ASRDeadListener is notified by ASRSink when ASR reconnect is exhausted
+// (W1-B.1, H2 dead-air defense). The listener speaks the tenant apology line
+// via TTS and clean-closes the session. Implemented by the dead-air handler
+// wired in the sink factory.
+type ASRDeadListener interface {
+	OnASRDead(ctx context.Context, session *Session)
+}
+
 // LoggingTranscriptConsumer logs transcript and VAD events.
 type LoggingTranscriptConsumer struct {
 	logger *slog.Logger
@@ -60,6 +68,11 @@ type ASRSink struct {
 	session    ASRSession
 	eventsDone chan struct{}
 	asrErrors  int64
+
+	// deadAir (W1-B.1): invoked when ASR reconnect is exhausted. May be nil
+	// (no dead-air wiring, e.g. unit tests); in that case ASREventDead is
+	// logged but the call is not closed by the sink.
+	deadAir ASRDeadListener
 }
 
 // NewASRSink creates the terminal audio sink that forwards transcripts downstream.
@@ -79,6 +92,15 @@ func NewASRSink(provider ASRProvider, consumer TranscriptConsumer, sampleRate in
 		sampleRate: sampleRate,
 		logger:     logger,
 	}
+}
+
+// SetDeadAirListener wires the W1-B.1 terminal-ASR handler (speak apology +
+// clean-close). Call from the sink factory after construction. Nil leaves
+// ASREventDead logged-only (unit-test convenience).
+func (s *ASRSink) SetDeadAirListener(l ASRDeadListener) {
+	s.mu.Lock()
+	s.deadAir = l
+	s.mu.Unlock()
 }
 
 func (s *ASRSink) OnStart(ctx context.Context, session *Session) error {
@@ -141,6 +163,25 @@ func (s *ASRSink) consumeEvents(ctx context.Context, session *Session, asrSessio
 				"stream_sid", session.StreamSID,
 				"error", evt.Err,
 			)
+		case ASREventDead:
+			// W1-B.1 (H2 dead-air defense): ASR reconnect exhausted — the
+			// session is permanently deaf. Log asr_dead=true (always visible)
+			// and hand off to the dead-air listener to speak the tenant apology
+			// line via TTS and clean-close. Never continue deaf.
+			s.asrErrors++
+			s.mu.Lock()
+			deadAir := s.deadAir
+			s.mu.Unlock()
+			s.logger.Error("asr_dead=true asr reconnect exhausted",
+				"stream_sid", session.StreamSID,
+				"call_sid", session.CallSID,
+				"asr_errors", s.asrErrors,
+				"error", evt.Err,
+				"dead_air_handler_wired", deadAir != nil,
+			)
+			if deadAir != nil {
+				deadAir.OnASRDead(ctx, session)
+			}
 		}
 	}
 }

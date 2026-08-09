@@ -52,6 +52,22 @@ func main() {
 	}
 	sessionCloser.SetCarrierProfile(carrierProfile)
 
+	// W1-B.3 (H2 dead-air defense): carrier=asterisk owns the audio path
+	// end-to-end; running deaf or mute is a silent failure. Fail loudly at
+	// startup instead of serving a dead call.
+	if reqErr := media.ValidateCarrierRequirements(carrierCfg, asrCfg, ttsCfg); reqErr != nil {
+		reasons := []string{}
+		if cre, ok := reqErr.(*media.CarrierRequirementError); ok {
+			reasons = cre.Reasons
+		}
+		logger.Error("carrier requirements unmet; refusing to start",
+			"carrier", carrierCfg.Variant,
+			"reasons", reasons,
+			"error", reqErr.Error(),
+		)
+		os.Exit(1)
+	}
+
 	denoiser, err := media.NewDenoiser(denoiseCfg)
 	if err != nil {
 		logger.Error("denoiser init failed", "error", err)
@@ -201,12 +217,23 @@ func main() {
 		pipeline := media.NewTranscodeSink(
 			media.NewDenoiseSink(
 				media.NewAMDGateSink(
-					media.NewASRSink(
-						asrProvider,
-						turnManager,
-						target.SampleRate,
-						logger,
-					),
+					func() media.AudioSink {
+						asrSink := media.NewASRSink(
+							asrProvider,
+							turnManager,
+							target.SampleRate,
+							logger,
+						)
+						// W1-B.1 (H2 dead-air defense): ASR reconnect exhausted →
+						// speak tenant apology line + clean-close. Wired only when
+						// TTS is live (apology needs a voice); without TTS the sink
+						// logs asr_dead=true but cannot speak (carrier=asterisk startup
+						// validation already fails loudly in that case).
+						if ttsConsumer != nil {
+							asrSink.SetDeadAirListener(media.NewDeadAirHandler(ttsConsumer, logger))
+						}
+						return asrSink
+					}(),
 					amdClassifier,
 					amdListener,
 					target.SampleRate,

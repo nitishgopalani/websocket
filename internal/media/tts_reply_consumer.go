@@ -121,6 +121,17 @@ type TTSReplyConsumer struct {
 	speakWatermark  int
 
 	routeStarted bool
+
+	// W1-B.2 (H2 dead-air defense): consecutive TTS speak-fail handling.
+	// 1st fail with non-empty text → ERROR log + holding-line attempt.
+	// 2nd consecutive fail → speak apology line + graceful close (onEndCall).
+	// Reset to 0 on any successful Speak. Per-consumer (= per-session in the
+	// sink factory), guarded by c.mu.
+	consecutiveSpeakFails int
+	holdingLine           string
+	apologyText           string
+	apologyVoiceID        string
+	apologyTurnID         string
 }
 
 // NewTTSReplyConsumer constructs a reply consumer that streams text to TTS and routes audio to egress.
@@ -205,6 +216,26 @@ func (c *TTSReplyConsumer) SetEndCallDelay(turnID string, d time.Duration) {
 	c.mu.Unlock()
 }
 
+// SetHoldingLine sets the 1st-TTS-fail holding utterance (W1-B.2). Empty = skip
+// the holding-line attempt and go straight to the apology on the 2nd failure.
+func (c *TTSReplyConsumer) SetHoldingLine(text string) {
+	c.mu.Lock()
+	c.holdingLine = text
+	c.mu.Unlock()
+}
+
+// SetApologyLine sets the terminal apology spoken on ASR-dead (W1-B.1) or
+// 2nd-consecutive TTS speak-fail (W1-B.2). ``text`` is the tenant's
+// unknown_info-register apology; ``voiceID`` selects the same TTS voice as the
+// unknown_info register. Call after AttachStream so the voice applies.
+func (c *TTSReplyConsumer) SetApologyLine(text, voiceID string) {
+	c.mu.Lock()
+	c.apologyText = text
+	c.apologyVoiceID = voiceID
+	c.apologyTurnID = "apology-dead-air"
+	c.mu.Unlock()
+}
+
 // SpeakHoldingLine plays a configured holding utterance (dead-air watchdog).
 func (c *TTSReplyConsumer) SpeakHoldingLine(ctx context.Context, session *Session, turnID, text string) {
 	if text == "" || session == nil {
@@ -212,6 +243,46 @@ func (c *TTSReplyConsumer) SpeakHoldingLine(ctx context.Context, session *Sessio
 	}
 	c.OnReplyChunk(ctx, session, turnID, 0, text)
 	c.OnReplyDone(ctx, session, turnID, false, "watchdog_holding")
+}
+
+// SpeakApologyAndClose speaks the terminal apology line (W1-B.1/W1-B.2) in the
+// tenant's unknown_info voice, then clean-closes the session via onEndCall.
+// Idempotent: a session closing in flight is guarded by the closer itself.
+// The apology is spoken even if TTS is nil (logged) so the dead-air event is
+// always visible; the close is unconditional (never continue deaf/mute).
+func (c *TTSReplyConsumer) SpeakApologyAndClose(ctx context.Context, session *Session, reason string) {
+	if session == nil {
+		return
+	}
+	c.mu.Lock()
+	text := c.apologyText
+	voice := c.apologyVoiceID
+	turnID := c.apologyTurnID
+	closer := c.onEndCall
+	c.mu.Unlock()
+	if c.logger != nil {
+		c.logger.Error("dead_air apology speaking",
+			"stream_sid", session.StreamSID,
+			"call_sid", session.CallSID,
+			"reason", reason,
+			"turn_id", turnID,
+			"text_len", len(text),
+			"voice_id", voice,
+		)
+	}
+	if text == "" {
+		// No apology configured — still close (never continue deaf/mute).
+		if closer != nil {
+			closer(ctx, session)
+		}
+		return
+	}
+	ApplyTTSTurnVoice(c.tts, turnID, voice, "", nil)
+	c.OnReplyChunk(ctx, session, turnID, 0, text)
+	c.OnReplyDone(ctx, session, turnID, true, "dead_air_apology")
+	// finishPlayback will invoke onEndCall after the apology's playback mark.
+	// If TTS is nil/no audio, OnReplyDone armed the final-fallback which fires
+	// finalizeTurn → finishPlayback → onEndCall. Either way the call closes.
 }
 
 // BindSession associates the consumer with the active telephony session (one per sink factory).
@@ -308,9 +379,77 @@ func (c *TTSReplyConsumer) OnReplyChunk(ctx context.Context, session *Session, t
 	if c.tts == nil {
 		return
 	}
-	if err := c.tts.Speak(turnID, text); err != nil && c.logger != nil {
-		c.logger.Warn("tts speak failed", "turn_id", turnID, "error", err)
+	if err := c.tts.Speak(turnID, text); err != nil {
+		c.handleSpeakFailure(ctx, session, turnID, text, err)
+	} else if text != "" {
+		// W1-B.2: a successful non-empty Speak resets the consecutive-fail counter.
+		c.resetSpeakFailures()
 	}
+}
+
+// handleSpeakFailure implements W1-B.2 (H2 dead-air defense): on a TTS Speak
+// failure with non-empty text, escalate by consecutive-failure count.
+//
+//	1st failure  → ERROR log + holding-line attempt (if configured).
+//	2nd in a row → speak the terminal apology line + graceful close.
+//
+// Any successful Speak resets the counter (see OnReplyChunk). The holding line
+// is spoken via SpeakHoldingLine (its own OnReplyDone, no end_call). The
+// apology path is terminal — it always closes the session, never continues
+// mute. Empty-text Speaks (synthesis flush) do not count: a flush failing is
+// not a dead-air fault.
+//
+// Recursion guard: if the failing Speak IS the apology line itself (turnID ==
+// apologyTurnID), the TTS is dead — do NOT re-attempt the apology; go straight
+// to graceful close. Without this, a failing TTS stream would recurse
+// apology→speak-fail→apology forever.
+func (c *TTSReplyConsumer) handleSpeakFailure(ctx context.Context, session *Session, turnID, text string, speakErr error) {
+	if text == "" {
+		if c.logger != nil {
+			c.logger.Warn("tts speak (flush) failed", "turn_id", turnID, "error", speakErr)
+		}
+		return
+	}
+	c.mu.Lock()
+	isApology := turnID == c.apologyTurnID
+	c.consecutiveSpeakFails++
+	fails := c.consecutiveSpeakFails
+	holding := c.holdingLine
+	closer := c.onEndCall
+	c.mu.Unlock()
+	if c.logger != nil {
+		c.logger.Error("tts speak failed (non-empty text)",
+			"stream_sid", session.StreamSID,
+			"turn_id", turnID,
+			"text_len", len(text),
+			"consecutive_fails", fails,
+			"is_apology_turn", isApology,
+			"error", speakErr,
+		)
+	}
+	switch {
+	case isApology:
+		// The apology itself failed to synthesize — TTS is dead. Close
+		// silently; never recurse into another apology attempt.
+		if closer != nil {
+			closer(ctx, session)
+		}
+	case fails == 1 && holding != "":
+		c.SpeakHoldingLine(ctx, session, "tts-retry-hold", holding)
+	case fails >= 2:
+		c.SpeakApologyAndClose(ctx, session, "tts_speak_fail_consecutive")
+	default:
+		// fails == 1 and no holding line configured: wait for next turn.
+	}
+}
+
+// resetSpeakFailures clears the consecutive-failure counter on a successful
+// Speak (W1-B.2). Called from OnReplyChunk before the Speak call when text is
+// non-empty.
+func (c *TTSReplyConsumer) resetSpeakFailures() {
+	c.mu.Lock()
+	c.consecutiveSpeakFails = 0
+	c.mu.Unlock()
 }
 
 func (c *TTSReplyConsumer) OnReplyDone(ctx context.Context, session *Session, turnID string, endCall bool, disposition string) {

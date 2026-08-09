@@ -1,6 +1,7 @@
 package media
 
 import (
+	"fmt"
 	"os"
 	"strings"
 )
@@ -72,6 +73,45 @@ func CarrierConfigFromEnv() CarrierConfig {
 		cfg.Variant = v
 	}
 	return cfg
+}
+
+// CarrierRequirementError is returned by ValidateCarrierRequirements when a
+// carrier-mode hard requirement is unmet. W1-B.3: startup FAILS LOUDLY
+// (os.Exit(1) in main) rather than running deaf/mute.
+type CarrierRequirementError struct {
+	Carrier string
+	Reasons []string
+}
+
+func (e *CarrierRequirementError) Error() string {
+	return fmt.Sprintf("carrier %q requirements unmet: %s", e.Carrier, strings.Join(e.Reasons, "; "))
+}
+
+// ValidateCarrierRequirements enforces carrier-mode hard requirements.
+//
+// W1-B.3 (H2 dead-air defense): under carrier=asterisk the media server
+// owns the call audio path end-to-end (binary PCM ingress + egress). Running
+// deaf (ASR off) or mute (TTS off) is a silent failure — the caller hears
+// nothing or is not heard. Fail loudly at startup instead.
+//
+// asrCfg.Enabled / ttsCfg.Enabled reflect the parsed ASR_ENABLED / TTS_ENABLED
+// env flags. Returns a *CarrierRequirementError listing every unmet
+// requirement (so the operator sees the full gap in one shot).
+func ValidateCarrierRequirements(carrier CarrierConfig, asrCfg ASRConfig, ttsCfg TTSConfig) error {
+	if strings.ToLower(carrier.Variant) != CarrierAsterisk {
+		return nil
+	}
+	var reasons []string
+	if !asrCfg.Enabled {
+		reasons = append(reasons, "ASR_ENABLED must be true under carrier=asterisk (deaf call is never acceptable)")
+	}
+	if !ttsCfg.Enabled {
+		reasons = append(reasons, "TTS_ENABLED must be true under carrier=asterisk (mute call is never acceptable)")
+	}
+	if len(reasons) == 0 {
+		return nil
+	}
+	return &CarrierRequirementError{Carrier: CarrierAsterisk, Reasons: reasons}
 }
 
 // NewCarrierSerializer returns the serializer for the configured carrier variant.

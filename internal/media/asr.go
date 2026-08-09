@@ -41,6 +41,11 @@ const (
 	ASREventSpeechStart
 	ASREventSpeechEnd
 	ASREventError
+	// ASREventDead (W1-B.1, H2 dead-air defense): ASR reconnect exhausted — the
+	// session is permanently deaf. The sink must speak the tenant apology line
+	// via TTS, log asr_dead=true, and clean-close the call. Distinct from
+	// ASREventError (transient/retryable) so the sink can branch on terminality.
+	ASREventDead
 )
 
 // ASREvent is emitted on an ASRSession event stream.
