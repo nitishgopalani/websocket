@@ -30,10 +30,11 @@ const (
 // fallbackSpeakerV2 remaps bulbul:v3 speakers to bulbul:v2 catalog on retry.
 // Unknown speakers fall through to FallbackSpeakerV2Default.
 var fallbackSpeakerV2 = map[string]string{
-	"priya": "anushka",
-	"neha":  "manisha",
-	"kabir": "hitesh",
-	"amit":  "karun",
+	"priya":  "anushka",
+	"simran": "anushka", // Z2: predue/ondue v3 speaker; reuse anushka on v2 fallback.
+	"neha":   "manisha",
+	"kabir":  "hitesh",
+	"amit":   "karun",
 }
 
 const FallbackSpeakerV2Default = "abhilash"

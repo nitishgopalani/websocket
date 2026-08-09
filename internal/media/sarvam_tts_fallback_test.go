@@ -52,10 +52,12 @@ func fmtAny(v any) string {
 func TestRemapSpeakerV2(t *testing.T) {
 	cases := map[string]string{
 		"priya":         "anushka",
+		"simran":        "anushka", // Z2
 		"neha":          "manisha",
 		"kabir":         "hitesh",
 		"amit":          "karun",
 		"Priya":         "anushka",
+		"Simran":        "anushka", // Z2 (case-insensitive)
 		"unknown-voice": FallbackSpeakerV2Default,
 		"":              FallbackSpeakerV2Default,
 	}
