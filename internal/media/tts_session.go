@@ -163,6 +163,12 @@ func (r *resamplingTTSStream) SetTurnVoice(turnID, voiceID, model string, pace *
 	ApplyTTSTurnVoice(r.inner, turnID, voiceID, model, pace)
 }
 
+// PreOpen delegates to the inner stream (Item 1, DEBT-034).
+func (r *resamplingTTSStream) PreOpen(ctx context.Context, speaker string) error {
+	ApplyTTSPreOpen(r.inner, ctx, speaker)
+	return nil
+}
+
 func (r *resamplingTTSStream) Speak(turnID string, text string) error {
 	return r.inner.Speak(turnID, text)
 }

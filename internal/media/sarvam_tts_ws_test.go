@@ -884,6 +884,227 @@ func TestSarvamWSStream_FirstSpeakVoiceOverrideNoReconnect(t *testing.T) {
 	}
 }
 
+// Item 1 (DEBT-034): PreOpen at session_ready using the resolved scenario
+// voice (simran) → the first Speak hits an already-open connection with the
+// SAME speaker → zero voice-change reconnects.
+func TestSarvamWSStream_PreOpenSameVoiceNoReconnect(t *testing.T) {
+	var connectCount atomic.Int32
+	var lastConfig atomic.Value
+
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		connectCount.Add(1)
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			_, data, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			var msg sarvamWSMessage
+			if err := json.Unmarshal(data, &msg); err != nil {
+				continue
+			}
+			switch msg.Type {
+			case "config":
+				lastConfig.Store(msg.Data)
+			case "text":
+				pcm := make([]byte, 320)
+				audioResp := map[string]any{
+					"type": "audio",
+					"data": map[string]any{
+						"audio":        base64.StdEncoding.EncodeToString(pcm),
+						"content_type": "audio/raw",
+					},
+				}
+				payload, _ := json.Marshal(audioResp)
+				_ = conn.WriteMessage(websocket.TextMessage, payload)
+			case "flush":
+				finalResp := map[string]any{
+					"type": "event",
+					"data": map[string]any{"event_type": "final"},
+				}
+				payload, _ := json.Marshal(finalResp)
+				_ = conn.WriteMessage(websocket.TextMessage, payload)
+			}
+		}
+	}))
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	provider := &SarvamTTSProvider{
+		apiKey:  "test-key",
+		baseURL: srv.URL,
+		model:   "bulbul:v3",
+		speaker: "amit", // env default
+		lang:    "hi-IN",
+		logger:  slog.Default(),
+	}
+	ws := newSarvamTTSWSStream(provider, TTSSessionMeta{StreamSID: "preopen-test", CallSID: "c-preopen"}, 8000)
+	ws.wsURL = wsURL
+
+	if err := ws.Open(context.Background()); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer ws.Close()
+
+	// Item 1: PreOpen with the resolved scenario voice (simran) BEFORE any Speak.
+	if err := ws.PreOpen(context.Background(), "simran"); err != nil {
+		t.Fatalf("PreOpen: %v", err)
+	}
+
+	// Wait for the pre-open to dial.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if connectCount.Load() >= 1 && lastConfig.Load() != nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := connectCount.Load(); got != 1 {
+		t.Fatalf("pre-open connectCount = %d, want 1", got)
+	}
+	cfg, ok := lastConfig.Load().(map[string]any)
+	if !ok {
+		t.Fatal("no config received from pre-open")
+	}
+	if cfg["speaker"] != "simran" {
+		t.Errorf("pre-open config speaker = %v, want simran", cfg["speaker"])
+	}
+
+	// First Speak with the SAME speaker (simran) must NOT reconnect.
+	ws.SetTurnVoice("turn-1", "simran", "bulbul:v3", nil)
+	if err := ws.Speak("turn-1", "नमस्ते"); err != nil {
+		t.Fatalf("Speak: %v", err)
+	}
+	_ = ws.Speak("turn-1", "") // flush
+
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		// give the server a moment to process
+		time.Sleep(50 * time.Millisecond)
+		break
+	}
+
+	if got := connectCount.Load(); got != 1 {
+		t.Errorf("post-Speak connectCount = %d, want 1 (same-voice Speak must not reconnect)", got)
+	}
+}
+
+// Item 1 (DEBT-034): PreOpen with speaker A, then first Speak with a DIFFERENT
+// speaker B → the First-Speak override reconnects (RC3 guarantee holds).
+func TestSarvamWSStream_PreOpenDifferentVoiceReconnects(t *testing.T) {
+	var connectCount atomic.Int32
+	var configs []map[string]any
+	var mu sync.Mutex
+
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		connectCount.Add(1)
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			_, data, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			var msg sarvamWSMessage
+			if err := json.Unmarshal(data, &msg); err != nil {
+				continue
+			}
+			switch msg.Type {
+			case "config":
+				mu.Lock()
+				configs = append(configs, msg.Data)
+				mu.Unlock()
+			case "text":
+				pcm := make([]byte, 320)
+				audioResp := map[string]any{
+					"type": "audio",
+					"data": map[string]any{
+						"audio":        base64.StdEncoding.EncodeToString(pcm),
+						"content_type": "audio/raw",
+					},
+				}
+				payload, _ := json.Marshal(audioResp)
+				_ = conn.WriteMessage(websocket.TextMessage, payload)
+			case "flush":
+				finalResp := map[string]any{
+					"type": "event",
+					"data": map[string]any{"event_type": "final"},
+				}
+				payload, _ := json.Marshal(finalResp)
+				_ = conn.WriteMessage(websocket.TextMessage, payload)
+			}
+		}
+	}))
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	provider := &SarvamTTSProvider{
+		apiKey:  "test-key",
+		baseURL: srv.URL,
+		model:   "bulbul:v3",
+		speaker: "amit",
+		lang:    "hi-IN",
+		logger:  slog.Default(),
+	}
+	ws := newSarvamTTSWSStream(provider, TTSSessionMeta{StreamSID: "preopen-diff", CallSID: "c-preopen-diff"}, 8000)
+	ws.wsURL = wsURL
+
+	if err := ws.Open(context.Background()); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer ws.Close()
+
+	// PreOpen with simran.
+	if err := ws.PreOpen(context.Background(), "simran"); err != nil {
+		t.Fatalf("PreOpen: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if connectCount.Load() >= 1 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// First Speak with a DIFFERENT speaker (priya) → must reconnect.
+	ws.SetTurnVoice("turn-1", "priya", "bulbul:v3", nil)
+	if err := ws.Speak("turn-1", "नमस्ते"); err != nil {
+		t.Fatalf("Speak: %v", err)
+	}
+	_ = ws.Speak("turn-1", "") // flush
+
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if connectCount.Load() >= 2 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := connectCount.Load(); got != 2 {
+		t.Errorf("connectCount = %d, want 2 (different-voice Speak must reconnect)", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(configs) < 2 {
+		t.Fatalf("want 2 configs, got %d", len(configs))
+	}
+	if configs[0]["speaker"] != "simran" {
+		t.Errorf("config[0] speaker = %v, want simran (pre-open)", configs[0]["speaker"])
+	}
+	if configs[1]["speaker"] != "priya" {
+		t.Errorf("config[1] speaker = %v, want priya (first-speak override)", configs[1]["speaker"])
+	}
+}
+
 // R3-TTS(c): a session with zero Speaks must not open a Sarvam connection at all.
 func TestSarvamWSStream_ZeroSpeaksNoConnection(t *testing.T) {
 	var connectCount atomic.Int32

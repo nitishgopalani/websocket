@@ -1,6 +1,7 @@
 package media
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"log/slog"
@@ -202,6 +203,12 @@ func (c *cachingTTSStream) SetTurnVoice(turnID, voiceID, model string, pace *flo
 	c.mu.Lock()
 	c.turnVoice[turnID] = strings.TrimSpace(voiceID) + "|" + strings.TrimSpace(model) + "|" + paceKey
 	c.mu.Unlock()
+}
+
+// PreOpen delegates to the inner stream (Item 1, DEBT-034).
+func (c *cachingTTSStream) PreOpen(ctx context.Context, speaker string) error {
+	ApplyTTSPreOpen(c.inner, ctx, speaker)
+	return nil
 }
 
 // Speak enqueues a segment (non-empty text) or a flush signal (empty text) for the

@@ -342,6 +342,16 @@ func (c *Client) readSessionReady(conn *websocket.Conn, session *media.Session) 
 			)
 		}
 	}
+	// Item 1 (DEBT-034): pre-open the TTS WebSocket at session_ready using the
+	// resolved scenario voice (apology_voice_id) so the first Speak hits an
+	// already-open connection with zero dial latency. Best-effort; the
+	// First-Speak override still reconnects if the Speak's resolved voice
+	// differs from the pre-opened speaker.
+	if ready.ApologyVoiceID != "" {
+		if tc, ok := c.reply.(*media.TTSReplyConsumer); ok {
+			tc.PreOpenVoice(context.Background(), ready.ApologyVoiceID)
+		}
+	}
 	return nil
 }
 
@@ -391,6 +401,12 @@ func (c *Client) dispatchInbound(ctx context.Context, session *media.Session, da
 		if m.ApologyText != "" {
 			if tc, ok := c.reply.(*media.TTSReplyConsumer); ok {
 				tc.SetApologyLine(m.ApologyText, m.ApologyVoiceID)
+			}
+		}
+		// Item 1 (DEBT-034): pre-open TTS WS from late session_ready too.
+		if m.ApologyVoiceID != "" {
+			if tc, ok := c.reply.(*media.TTSReplyConsumer); ok {
+				tc.PreOpenVoice(context.Background(), m.ApologyVoiceID)
 			}
 		}
 	case ChunkMessage:

@@ -57,6 +57,27 @@ func ApplyTTSTurnVoice(stream TTSStream, turnID, voiceID, model string, pace *fl
 	}
 }
 
+// TTSPreOpener pre-opens the TTS WebSocket at session_ready using the resolved
+// scenario voice (Item 1, DEBT-034). Providers without a persistent WS
+// (e.g. REST) implement this as a no-op. Best-effort: a dial failure logs a
+// warning and the first Speak retries via ensureConnection. The First-Speak
+// override still reconnects if the Speak's resolved voice differs from the
+// pre-opened speaker.
+type TTSPreOpener interface {
+	PreOpen(ctx context.Context, speaker string) error
+}
+
+// ApplyTTSPreOpen walks the wrapper chain (cache → resample → sarvam WS) and
+// pre-opens the innermost WS-capable stream. Mirrors ApplyTTSTurnVoice.
+func ApplyTTSPreOpen(stream TTSStream, ctx context.Context, speaker string) {
+	if stream == nil {
+		return
+	}
+	if po, ok := stream.(TTSPreOpener); ok {
+		_ = po.PreOpen(ctx, speaker)
+	}
+}
+
 // TTSSessionMeta carries per-call metadata when opening TTS.
 type TTSSessionMeta struct {
 	StreamSID        string

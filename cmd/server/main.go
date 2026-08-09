@@ -127,6 +127,20 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Item 3 (DEBT-034): boot-time TTS cache pre-warm. Synthesize each
+	// scripted tenant's opener greeting + apology line into the global TTS
+	// cache so the first live call that Speaks the same line hits the cache
+	// with zero synthesis latency. Best-effort; lines that fail to synth are
+	// skipped (the live call synths on demand). Config via TTS_PREWARM_LINES
+	// (JSON) or TTS_PREWARM_FILE (path to JSON).
+	if preWarmLines := media.PreWarmLinesFromEnv(logger); len(preWarmLines) > 0 {
+		go func() {
+			warmed, warmMs := media.PreWarmTTS(context.Background(), ttsProvider, ttsCfg, preWarmLines, logger)
+			logger.Info("tts prewarm boot result",
+				"lines_warmed", warmed, "warm_ms", warmMs)
+		}()
+	}
+
 	target := cfg.TargetFormat()
 	metricsCfg := media.MetricsConfigFromEnv()
 	metrics := media.NewMetrics(metricsCfg)

@@ -73,7 +73,23 @@ type ASRSink struct {
 	// (no dead-air wiring, e.g. unit tests); in that case ASREventDead is
 	// logged but the call is not closed by the sink.
 	deadAir ASRDeadListener
+
+	// DEBT-035: ingress setup buffer. Frames arriving before the ASR WS is
+	// ready (s.session == nil) are buffered here instead of dropped, then
+	// drained to ASR in order once OnStart completes. Prevents early-caller-
+	// speech loss during the SIP-answer + connector→go-server setup window.
+	// Bounded by setupBufferMaxFrames; if the cap is hit the oldest frame is
+	// dropped (logged) so memory stays bounded if ASR never opens.
+	setupMu           sync.Mutex
+	setupBuffer       [][]byte
+	setupBufferDrops  int64
+	setupBufferMaxFrames int
 }
+
+// asrSetupBufferMaxFrames is the cap on the DEBT-035 setup buffer. At 20ms
+// frames this is ~10s of audio — well above the ~6s setup window observed
+// in UAT (SIP-answer 5.16s + connector→go-server 1.01s).
+const asrSetupBufferMaxFrames = 500
 
 // NewASRSink creates the terminal audio sink that forwards transcripts downstream.
 func NewASRSink(provider ASRProvider, consumer TranscriptConsumer, sampleRate int, logger *slog.Logger) *ASRSink {
@@ -91,6 +107,7 @@ func NewASRSink(provider ASRProvider, consumer TranscriptConsumer, sampleRate in
 		consumer:   consumer,
 		sampleRate: sampleRate,
 		logger:     logger,
+		setupBufferMaxFrames: asrSetupBufferMaxFrames,
 	}
 }
 
@@ -131,6 +148,33 @@ func (s *ASRSink) OnStart(ctx context.Context, session *Session) error {
 	s.session = asrSession
 	s.eventsDone = make(chan struct{})
 	s.mu.Unlock()
+
+	// DEBT-035: drain the setup buffer to ASR now that the WS is ready.
+	// Frames arrived during the setup window (SIP-answer + connector→go-server)
+	// are forwarded in order so early caller speech is not lost.
+	s.setupMu.Lock()
+	pending := s.setupBuffer
+	s.setupBuffer = nil
+	setupDrops := s.setupBufferDrops
+	s.setupMu.Unlock()
+	for _, f := range pending {
+		if err := asrSession.SendAudio(f); err != nil {
+			if err == ErrASRSessionClosed {
+				break
+			}
+			s.logger.Warn("asr send (setup buffer drain) failed; continuing call",
+				"stream_sid", session.StreamSID,
+				"error", err,
+			)
+		}
+	}
+	if len(pending) > 0 || setupDrops > 0 {
+		s.logger.Info("asr drained setup buffer on ready",
+			"stream_sid", session.StreamSID,
+			"frames_drained", len(pending),
+			"setup_buffer_drops", setupDrops,
+		)
+	}
 
 	go s.consumeEvents(ctx, session, asrSession)
 	return nil
@@ -191,6 +235,22 @@ func (s *ASRSink) OnAudio(ctx context.Context, session *Session, frame []byte) e
 	asrSession := s.session
 	s.mu.Unlock()
 	if asrSession == nil {
+		// DEBT-035: ASR WS not ready yet — buffer the ingress frame instead of
+		// dropping it. Drained in order by OnStart once the WS connects. Bounded
+		// by setupBufferMaxFrames; if the cap is hit the oldest frame is dropped
+		// (logged) so memory stays bounded if ASR never opens.
+		s.setupMu.Lock()
+		if s.setupBufferMaxFrames > 0 && len(s.setupBuffer) >= s.setupBufferMaxFrames {
+			s.setupBuffer = s.setupBuffer[1:]
+			s.setupBufferDrops++
+			s.logger.Warn("asr setup buffer full; dropping oldest frame",
+				"stream_sid", session.StreamSID,
+				"setup_buffer_drops", s.setupBufferDrops,
+				"cap", s.setupBufferMaxFrames,
+			)
+		}
+		s.setupBuffer = append(s.setupBuffer, frame)
+		s.setupMu.Unlock()
 		return nil
 	}
 	if err := asrSession.SendAudio(frame); err != nil {

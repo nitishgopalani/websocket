@@ -241,6 +241,40 @@ func (s *sarvamTTSWSStream) defaultConfig() sarvamWSConfig {
 	return cfg
 }
 
+// PreOpen dials the Sarvam WebSocket at session_ready using the resolved
+// scenario voice (apology_voice_id from the brain's session_ready payload),
+// so the first Speak hits an already-open connection and emits audio with
+// zero dial latency (Item 1, DEBT-034). Best-effort: a dial failure logs a
+// warning and the first Speak retries via ensureConnection. The First-Speak
+// override still reconnects if the Speak's resolved voice differs from the
+// pre-opened speaker (ensureConnection checks cfg.equal(connConfig)).
+func (s *sarvamTTSWSStream) PreOpen(ctx context.Context, speaker string) error {
+	if s.closed {
+		return ErrTTSStreamClosed
+	}
+	cfg := s.defaultConfig()
+	if sp := strings.TrimSpace(speaker); sp != "" {
+		cfg.speaker = sp
+	}
+	if err := s.connect(ctx, cfg); err != nil {
+		s.logger.Warn("sarvam tts ws pre-open failed (deferred to first Speak)",
+			"stream_sid", s.meta.StreamSID,
+			"speaker", cfg.speaker,
+			"error", err,
+		)
+		return err
+	}
+	s.logger.Info("sarvam tts ws pre-opened at session_ready",
+		"stream_sid", s.meta.StreamSID,
+		"speaker", cfg.speaker,
+		"model", cfg.model,
+		"language", cfg.language,
+		"sample_rate", cfg.sampleRate,
+		"path", "ws",
+	)
+	return nil
+}
+
 func (s *sarvamTTSWSStream) buildWSURL() string {
 	u, err := url.Parse(s.wsURL)
 	if err != nil {

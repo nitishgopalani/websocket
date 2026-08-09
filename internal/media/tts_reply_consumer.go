@@ -236,6 +236,24 @@ func (c *TTSReplyConsumer) SetApologyLine(text, voiceID string) {
 	c.mu.Unlock()
 }
 
+// PreOpenVoice pre-opens the TTS WebSocket at session_ready using the resolved
+// scenario voice (apology_voice_id from the brain's session_ready payload),
+// so the first Speak hits an already-open connection and emits audio with
+// zero dial latency (Item 1, DEBT-034). Best-effort: a dial failure logs a
+// warning and the first Speak retries via ensureConnection. The First-Speak
+// override still reconnects if the Speak's resolved voice differs from the
+// pre-opened speaker. Safe to call before any Speak; no-op if no stream or
+// the provider has no persistent WS (REST).
+func (c *TTSReplyConsumer) PreOpenVoice(ctx context.Context, speaker string) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	c.mu.Lock()
+	stream := c.tts
+	c.mu.Unlock()
+	ApplyTTSPreOpen(stream, ctx, speaker)
+}
+
 // SpeakHoldingLine plays a configured holding utterance (dead-air watchdog).
 func (c *TTSReplyConsumer) SpeakHoldingLine(ctx context.Context, session *Session, turnID, text string) {
 	if text == "" || session == nil {
