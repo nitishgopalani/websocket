@@ -284,3 +284,16 @@ func TestCachingTTSStream_CancelDropsTurn(t *testing.T) {
 	_ = cs.Close()
 }
 
+func TestSplitTemplateSegments(t *testing.T) {
+	pfx, sfx, ok := SplitTemplateSegments("नमस्ते {customer_name} जी, बात हो रही है।")
+	if !ok {
+		t.Fatal("expected template split")
+	}
+	if pfx == "" || sfx == "" {
+		t.Fatalf("prefix/suffix empty: %q / %q", pfx, sfx)
+	}
+	if _, _, ok := SplitTemplateSegments("no slots here"); ok {
+		t.Fatal("plain text must not split")
+	}
+}
+

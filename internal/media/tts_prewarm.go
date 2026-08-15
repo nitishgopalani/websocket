@@ -89,9 +89,28 @@ func PreWarmTTS(
 		if ln.Voice != "" || ln.Model != "" {
 			ApplyTTSTurnVoice(stream, turnID, ln.Voice, ln.Model, nil)
 		}
-		if err := stream.Speak(turnID, text); err != nil {
+		// DEBT-038: a template with {customer_name} warms the static
+		// prefix/suffix as separate cache keys (exact live Speak match).
+		speakTexts := []string{text}
+		if pfx, sfx, ok := SplitTemplateSegments(text); ok {
+			speakTexts = nil
+			if strings.TrimSpace(pfx) != "" {
+				speakTexts = append(speakTexts, pfx)
+			}
+			if strings.TrimSpace(sfx) != "" {
+				speakTexts = append(speakTexts, sfx)
+			}
+		}
+		var speakErr error
+		for _, part := range speakTexts {
+			if err := stream.Speak(turnID, part); err != nil {
+				speakErr = err
+				break
+			}
+		}
+		if speakErr != nil {
 			logger.Warn("tts prewarm speak failed",
-				"line", i, "voice", ln.Voice, "error", err)
+				"line", i, "voice", ln.Voice, "error", speakErr)
 			_ = stream.Close()
 			cancel()
 			continue

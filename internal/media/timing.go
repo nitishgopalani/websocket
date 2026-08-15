@@ -137,6 +137,19 @@ func (t *TurnTiming) durations() turnDurations {
 			d.MouthToEarMS = eg.Sub(caller).Milliseconds()
 		}
 	}
+	// DEBT-044: opener / missing caller_end used to log mouth_to_ear_ms=0
+	// while engine_ms was non-zero. Fall back to the earliest available
+	// start mark so t1 timing is a real interval.
+	if d.MouthToEarMS == 0 {
+		if eg, ok := t.marks[StageEgressFirstFrame]; ok {
+			for _, stage := range []string{StageSpeechEnd, StageASRFinal, StageEngineSent, StageSessionStart} {
+				if start, ok := t.marks[stage]; ok && eg.After(start) {
+					d.MouthToEarMS = eg.Sub(start).Milliseconds()
+					break
+				}
+			}
+		}
+	}
 	if start, ok := t.marks[StageSessionStart]; ok {
 		if eg, ok := t.marks[StageEgressFirstFrame]; ok && eg.After(start) {
 			d.OpenerMS = eg.Sub(start).Milliseconds()

@@ -68,6 +68,37 @@ func TestTurnTimingDerivedDurations(t *testing.T) {
 	}
 }
 
+func TestMouthToEarFallbackWhenCallerEndMissing(t *testing.T) {
+	// DEBT-044: opener t1 has no caller_end; m2e must not stay 0.
+	start := time.Date(2025, 7, 1, 12, 0, 0, 0, time.UTC)
+	clock := NewFakeClock(start)
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	metrics := NewMetrics(MetricsConfig{Enabled: false})
+	hub := NewTurnTimingHub("MZ-T0", clock, logger, metrics, LatencyBudget{MouthToEarTargetMs: 1200})
+
+	hub.MarkSessionStart()
+	clock.Advance(80 * time.Millisecond)
+	turn := hub.BindEngineTurn("MZ-T0-t1", true)
+	if turn == nil {
+		t.Fatal("expected turn timing")
+	}
+	clock.Advance(160 * time.Millisecond)
+	hub.MarkTurn("MZ-T0-t1", StageEngineFirstChunk)
+	clock.Advance(40 * time.Millisecond)
+	hub.MarkTurn("MZ-T0-t1", StageTTSFirstAudio)
+	clock.Advance(20 * time.Millisecond)
+	hub.MarkTurn("MZ-T0-t1", StageEgressFirstFrame)
+	hub.CompleteTurn("MZ-T0-t1", TurnOutcome{Disposition: "opener"})
+
+	d := turn.durations()
+	if d.MouthToEarMS <= 0 {
+		t.Fatalf("mouth_to_ear_ms = %d, want >0 fallback", d.MouthToEarMS)
+	}
+	if d.EngineMS != 160 {
+		t.Fatalf("engine_ms = %d, want 160", d.EngineMS)
+	}
+}
+
 func TestDeadAirWatchdogFiresOnce(t *testing.T) {
 	clock := NewFakeClock(time.Now())
 	speaker := &holdingSpeakerRecorder{}

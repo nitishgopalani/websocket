@@ -128,6 +128,22 @@ func ttsCacheKey(prefix, text string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// SplitTemplateSegments returns static prefix/suffix around the first {slot}
+// token (DEBT-038). Live calls Speak those static parts as their own cache keys.
+func SplitTemplateSegments(text string) (prefix, suffix string, ok bool) {
+	start := strings.Index(text, "{")
+	end := strings.Index(text, "}")
+	if start < 0 || end <= start {
+		return "", "", false
+	}
+	prefix = text[:start]
+	suffix = text[end+1:]
+	if strings.TrimSpace(prefix) == "" && strings.TrimSpace(suffix) == "" {
+		return "", "", false
+	}
+	return prefix, suffix, true
+}
+
 // cachingTTSStream wraps a TTSStream, serving repeated utterances from a shared
 // cache and recording fresh (cache-miss) synthesis for next time.
 //
