@@ -32,6 +32,8 @@ services:
   brain:
     image: fonada/voice-brain:latest
     restart: unless-stopped
+    stop_signal: SIGTERM
+    stop_grace_period: 180s
     depends_on:
       postgres:
         condition: service_healthy
@@ -89,6 +91,8 @@ services:
   go-server:
     image: fonada/voice-go-server:latest
     restart: unless-stopped
+    stop_signal: SIGTERM
+    stop_grace_period: 180s
     env_file:
       - .env
     ports:

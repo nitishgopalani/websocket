@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -94,14 +95,38 @@ func (s *Server) Run(ctx context.Context) error {
 
 	select {
 	case <-sigCtx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		s.logger.Info("shutting down media server")
-		s.manager.CloseAll(shutdownCtx)
+		cap := drainCap()
+		s.logger.Info("drain_started", "cap_s", int(cap.Seconds()), "active_sessions", s.manager.Count())
+		s.manager.BeginDrain()
+		drainCtx, cancel := context.WithTimeout(context.Background(), cap)
+		waitErr := s.manager.WaitIdle(drainCtx)
+		cancel()
+		if waitErr != nil {
+			s.logger.Warn("drain_timeout", "active_sessions", s.manager.Count(), "error", waitErr)
+			closeCtx, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			s.manager.CloseAll(closeCtx)
+			closeCancel()
+		} else {
+			s.logger.Info("drain_complete", "active_sessions", 0)
+		}
+		shutdownCtx, shutCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutCancel()
 		return s.httpSrv.Shutdown(shutdownCtx)
 	case err := <-errCh:
 		return err
 	}
+}
+
+func drainCap() time.Duration {
+	raw := os.Getenv("DRAIN_CAP_S")
+	if raw == "" {
+		return 180 * time.Second
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return 180 * time.Second
+	}
+	return time.Duration(n) * time.Second
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
@@ -110,6 +135,10 @@ func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	if s.manager.IsDraining() {
+		http.Error(w, "draining", http.StatusServiceUnavailable)
+		return
+	}
 	if s.cfg.CarrierProfile().BinaryIngress {
 		s.handleAsteriskWebSocket(w, r)
 		return

@@ -19,6 +19,7 @@ var (
 	ErrMissingStreamSID     = errors.New("missing stream_sid")
 	ErrInvalidStartEvent    = errors.New("invalid start event")
 	ErrSessionAlreadyExists = errors.New("session already exists")
+	ErrDraining             = errors.New("server draining")
 )
 
 // Session tracks one bidirectional media stream.
@@ -96,6 +97,7 @@ type SessionManager struct {
 	logger   *slog.Logger
 	newSink  func() AudioSink
 	metrics  *Metrics
+	draining atomic.Bool
 }
 
 // NewSessionManager creates a manager with the provided sink factory.
@@ -146,9 +148,38 @@ func (m *SessionManager) setActiveSessionsGauge(n int) {
 
 // Create opens a session from a start event. When conn is non-nil the session starts its
 // single outbound writer goroutine (gorilla/websocket requires one writer per connection).
+func (m *SessionManager) BeginDrain() {
+	m.draining.Store(true)
+	m.logger.Info("drain_started", "active_sessions", m.Count())
+}
+
+func (m *SessionManager) IsDraining() bool {
+	return m.draining.Load()
+}
+
+func (m *SessionManager) WaitIdle(ctx context.Context) error {
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		n := m.Count()
+		if n == 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			m.logger.Info("drain_waiting", "active_sessions", n)
+		}
+	}
+}
+
 func (m *SessionManager) Create(ctx context.Context, start StartEvent, conn *websocket.Conn) (*Session, error) {
 	if start.StreamSID == "" {
 		return nil, fmt.Errorf("%w: start event", ErrMissingStreamSID)
+	}
+	if m.IsDraining() {
+		return nil, ErrDraining
 	}
 
 	m.mu.Lock()
