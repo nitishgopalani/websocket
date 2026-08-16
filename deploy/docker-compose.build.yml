@@ -7,6 +7,9 @@ services:
     build:
       context: ../../Collection
       dockerfile: ../Websocket/deploy/docker/Dockerfile.brain
+      args:
+        GIT_SHA: ${GIT_SHA:-dev}
+        GIT_BRANCH: ${GIT_BRANCH:-dev}
     image: fonada/voice-brain:latest
 
   denoise:
@@ -31,6 +34,9 @@ services:
     build:
       context: ..
       dockerfile: deploy/docker/Dockerfile.go-server
+      args:
+        GIT_SHA: ${GIT_SHA:-dev}
+        GIT_BRANCH: ${GIT_BRANCH:-dev}
     image: fonada/voice-go-server:latest
 
   smoke:
