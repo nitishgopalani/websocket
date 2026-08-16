@@ -2,11 +2,14 @@
 # Collection brain — STUB_MODE/LLM_STUB/KB_STUB come from compose .env (not baked in).
 ARG GIT_SHA=dev
 ARG GIT_BRANCH=dev
+ARG GIT_BUILD_TIME=dev
 FROM python:3.11-slim-bookworm
 ARG GIT_SHA
 ARG GIT_BRANCH
+ARG GIT_BUILD_TIME
 ENV GIT_SHA=${GIT_SHA}
 ENV GIT_BRANCH=${GIT_BRANCH}
+ENV GIT_BUILD_TIME=${GIT_BUILD_TIME}
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*

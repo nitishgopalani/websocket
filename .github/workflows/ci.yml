@@ -1,5 +1,8 @@
 name: CI
 
+# Brain fixture + scenario-matrix suite lives in Collection/.github/workflows/ci.yml
+# (pytest tests/fixtures tests/matrix). This workflow covers go-server media/brain pkgs.
+
 on:
   push:
   pull_request:
